@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Angkringan POS",
   description:
-    "Aplikasi kasir dan pembukuan sederhana untuk UMKM angkringan: pemasukan, pengeluaran, laporan, dan hutang.",
+    "Aplikasi kasir dan pembukuan sederhana untuk UMKM angkringan: pemasukan, pengeluaran, laporan, hutang pelanggan, dan deposit.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

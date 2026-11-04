@@ -32,8 +32,17 @@ interface ExportRow {
   category: string | null;
   note: string | null;
   cashier_name: string | null;
+  cash_received: number | null;
+  change_amount: number;
   created_at: string;
   transaction_items?: { product_name: string; qty: number; subtotal: number }[];
+}
+
+interface LedgerRow {
+  kind: string;
+  amount: number;
+  transaction_id: number | null;
+  created_at: string;
 }
 
 export async function GET(request: Request) {
@@ -78,20 +87,31 @@ export async function GET(request: Request) {
     });
   }
 
-  const { data, error } = await supabase
-    .from("transactions")
-    .select(
-      "id, type, total, payment_method, category, note, cashier_name, created_at, transaction_items(product_name, qty, subtotal)",
-    )
-    .gte("created_at", start.toISOString())
-    .lte("created_at", end.toISOString())
-    .order("created_at", { ascending: true });
+  const [transactionsRes, ledgerRes] = await Promise.all([
+    supabase
+      .from("transactions")
+      .select(
+        "id, type, total, payment_method, category, note, cashier_name, cash_received, change_amount, created_at, transaction_items(product_name, qty, subtotal)",
+      )
+      .gte("created_at", start.toISOString())
+      .lte("created_at", end.toISOString())
+      .order("created_at", { ascending: true }),
+    supabase
+      .from("customer_ledger")
+      .select("kind, amount, transaction_id, created_at")
+      .gte("created_at", start.toISOString())
+      .lte("created_at", end.toISOString()),
+  ]);
 
-  if (error) {
-    return new Response(error.message, { status: 500 });
+  if (transactionsRes.error) {
+    return new Response(transactionsRes.error.message, { status: 500 });
+  }
+  if (ledgerRes.error) {
+    return new Response(ledgerRes.error.message, { status: 500 });
   }
 
-  const rows = (data ?? []) as unknown as ExportRow[];
+  const rows = (transactionsRes.data ?? []) as unknown as ExportRow[];
+  const ledgerRows = (ledgerRes.data ?? []) as unknown as LedgerRow[];
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "Angkringan POS";
   workbook.created = new Date();
@@ -128,16 +148,38 @@ export async function GET(request: Request) {
   sheet.getColumn("total").numFmt = '#,##0';
   styleHeader(sheet);
 
-  const totalIncome = rows
-    .filter((row) => row.type !== "expense")
+  const totalSales = rows
+    .filter((row) => row.type === "sale")
+    .reduce((sum, row) => sum + Number(row.total), 0);
+  const totalOtherIncome = rows
+    .filter((row) => row.type === "income")
     .reduce((sum, row) => sum + Number(row.total), 0);
   const totalExpense = rows
     .filter((row) => row.type === "expense")
     .reduce((sum, row) => sum + Number(row.total), 0);
+  const totalCashIn =
+    rows.reduce((sum, row) => {
+      if (row.type === "income") return sum + Number(row.total);
+      if (row.type !== "sale") return sum;
+      return (
+        sum +
+        Number(row.cash_received ?? row.total) -
+        Number(row.change_amount ?? 0)
+      );
+    }, 0) +
+    ledgerRows.reduce((sum, item) => {
+      if (item.transaction_id) return sum;
+      if (item.kind === "debt_payment" || item.kind === "deposit_add") {
+        return sum + Number(item.amount);
+      }
+      if (item.kind === "deposit_refund") return sum - Number(item.amount);
+      return sum;
+    }, 0);
+  const totalProfit = totalSales + totalOtherIncome - totalExpense;
 
   const totalRow = sheet.addRow({
     description: "TOTAL",
-    total: totalIncome - totalExpense,
+    total: totalProfit,
   });
   totalRow.font = { bold: true };
   totalRow.getCell("total").numFmt = '#,##0';
@@ -147,26 +189,32 @@ export async function GET(request: Request) {
   );
   summary.columns = [
     { header: "Periode", key: "period", width: 24 },
-    { header: "Pemasukan", key: "income", width: 18 },
+    { header: "Penjualan", key: "sales", width: 18 },
+    { header: "Pemasukan Lain", key: "otherIncome", width: 18 },
+    { header: "Kas Masuk", key: "cashIn", width: 18 },
     { header: "Pengeluaran", key: "expense", width: 18 },
     { header: "Laba", key: "profit", width: 18 },
     { header: "Transaksi", key: "count", width: 12 },
   ];
 
-  buildSummary(rows, mode, start, end).forEach((item) => {
+  buildSummary(rows, ledgerRows, mode, start, end).forEach((item) => {
     summary.addRow(item);
   });
 
-  summary.getColumn("income").numFmt = '#,##0';
+  summary.getColumn("sales").numFmt = '#,##0';
+  summary.getColumn("otherIncome").numFmt = '#,##0';
+  summary.getColumn("cashIn").numFmt = '#,##0';
   summary.getColumn("expense").numFmt = '#,##0';
   summary.getColumn("profit").numFmt = '#,##0';
   styleHeader(summary);
 
   summary.addRow({
     period: "TOTAL",
-    income: totalIncome,
+    sales: totalSales,
+    otherIncome: totalOtherIncome,
+    cashIn: totalCashIn,
     expense: totalExpense,
-    profit: totalIncome - totalExpense,
+    profit: totalProfit,
     count: rows.length,
   });
   summary.lastRow!.font = { bold: true };
@@ -199,13 +247,22 @@ function styleHeader(sheet: ExcelJS.Worksheet) {
 
 function buildSummary(
   rows: ExportRow[],
+  ledgerRows: LedgerRow[],
   mode: "daily" | "monthly",
   start: Date,
   end: Date,
 ) {
   const map = new Map<
     string,
-    { period: string; income: number; expense: number; profit: number; count: number }
+    {
+      period: string;
+      sales: number;
+      otherIncome: number;
+      cashIn: number;
+      expense: number;
+      profit: number;
+      count: number;
+    }
   >();
 
   const keyFor = (date: Date) =>
@@ -218,7 +275,9 @@ function buildSummary(
       const key = `${start.getFullYear()}-${month}`;
       map.set(key, {
         period: `${MONTH_LABELS[month]} ${start.getFullYear()}`,
-        income: 0,
+        sales: 0,
+        otherIncome: 0,
+        cashIn: 0,
         expense: 0,
         profit: 0,
         count: 0,
@@ -232,7 +291,9 @@ function buildSummary(
         period: new Intl.DateTimeFormat("id-ID", { dateStyle: "medium" }).format(
           cursor,
         ),
-        income: 0,
+        sales: 0,
+        otherIncome: 0,
+        cashIn: 0,
         expense: 0,
         profit: 0,
         count: 0,
@@ -244,13 +305,33 @@ function buildSummary(
   rows.forEach((row) => {
     const entry = map.get(keyFor(new Date(row.created_at)));
     if (!entry) return;
-    if (row.type === "expense") entry.expense += Number(row.total);
-    else entry.income += Number(row.total);
+    if (row.type === "expense") {
+      entry.expense += Number(row.total);
+    } else if (row.type === "income") {
+      entry.otherIncome += Number(row.total);
+      entry.cashIn += Number(row.total);
+    } else {
+      entry.sales += Number(row.total);
+      entry.cashIn +=
+        Number(row.cash_received ?? row.total) -
+        Number(row.change_amount ?? 0);
+    }
     entry.count += 1;
+  });
+
+  ledgerRows.forEach((item) => {
+    if (item.transaction_id) return;
+    const entry = map.get(keyFor(new Date(item.created_at)));
+    if (!entry) return;
+    if (item.kind === "debt_payment" || item.kind === "deposit_add") {
+      entry.cashIn += Number(item.amount);
+    } else if (item.kind === "deposit_refund") {
+      entry.cashIn -= Number(item.amount);
+    }
   });
 
   return Array.from(map.values()).map((entry) => ({
     ...entry,
-    profit: entry.income - entry.expense,
+    profit: entry.sales + entry.otherIncome - entry.expense,
   }));
 }

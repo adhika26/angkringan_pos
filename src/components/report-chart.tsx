@@ -78,7 +78,7 @@ export function ReportChart({
           labels,
           datasets: [
             {
-              label: "Pemasukan",
+              label: "Penjualan",
               data: income,
               backgroundColor: "#10b981",
               hoverBackgroundColor: "#059669",

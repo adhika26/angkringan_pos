@@ -33,7 +33,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/pos", label: "Kasir", icon: ShoppingCart },
   { href: "/transactions", label: "Transaksi", icon: ReceiptText },
   { href: "/reports", label: "Laporan", icon: BarChart3, ownerOnly: true },
-  { href: "/debts", label: "Hutang & Piutang", icon: HandCoins, ownerOnly: true },
+  { href: "/debts", label: "Hutang Pelanggan", icon: HandCoins },
   { href: "/products", label: "Produk", icon: Package, ownerOnly: true },
   { href: "/users", label: "Pengguna", icon: Users, ownerOnly: true },
 ];

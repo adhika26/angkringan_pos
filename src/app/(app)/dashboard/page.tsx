@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  ArrowDownLeft,
   ArrowUpRight,
+  Banknote,
   Loader2,
   Plus,
   ReceiptText,
@@ -14,21 +14,37 @@ import {
 } from "lucide-react";
 import { SalesChart } from "@/components/sales-chart";
 import { createClient } from "@/lib/supabase/client";
+import { getErrorMessage } from "@/lib/error";
 import {
   endOfDay,
   formatDateTime,
   formatRupiah,
   startOfDay,
 } from "@/lib/format";
-import type { Transaction, TransactionType } from "@/lib/types";
+import type { Transaction } from "@/lib/types";
 
 interface Summary {
-  income: number;
+  sales: number;
+  manualIncome: number;
   expense: number;
+  cashIn: number;
   count: number;
 }
 
-const EMPTY_SUMMARY: Summary = { income: 0, expense: 0, count: 0 };
+interface LedgerRow {
+  kind: string;
+  amount: number;
+  transaction_id: number | null;
+  created_at: string;
+}
+
+const EMPTY_SUMMARY: Summary = {
+  sales: 0,
+  manualIncome: 0,
+  expense: 0,
+  cashIn: 0,
+  count: 0,
+};
 
 export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
@@ -66,26 +82,56 @@ export default function DashboardPage() {
         const dayStart = startOfDay(now).toISOString();
         const dayEnd = endOfDay(now).toISOString();
 
-        const { data: todayRows, error: todayError } = await supabase
-          .from("transactions")
-          .select("id, type, total, payment_method, category, note, cashier_name, created_at")
-          .gte("created_at", dayStart)
-          .lte("created_at", dayEnd)
-          .order("created_at", { ascending: false });
+        const [todayRes, ledgerRes] = await Promise.all([
+          supabase
+            .from("transactions")
+            .select(
+              "id, type, total, payment_method, category, note, cashier_name, cash_received, change_amount, created_at",
+            )
+            .gte("created_at", dayStart)
+            .lte("created_at", dayEnd)
+            .order("created_at", { ascending: false }),
+          supabase
+            .from("customer_ledger")
+            .select("kind, amount, transaction_id, created_at")
+            .gte("created_at", dayStart)
+            .lte("created_at", dayEnd),
+        ]);
 
-        if (todayError) throw todayError;
+        if (todayRes.error) throw todayRes.error;
+        if (ledgerRes.error) throw ledgerRes.error;
 
-        const rows = (todayRows ?? []) as Transaction[];
+        const rows = (todayRes.data ?? []) as Transaction[];
         const summary = rows.reduce<Summary>(
           (acc, row) => {
             const total = Number(row.total);
-            if (row.type === "expense") acc.expense += total;
-            else acc.income += total;
+            if (row.type === "expense") {
+              acc.expense += total;
+            } else if (row.type === "income") {
+              acc.manualIncome += total;
+              acc.cashIn += total;
+            } else {
+              acc.sales += total;
+              acc.cashIn +=
+                Number(row.cash_received ?? row.total) -
+                Number(row.change_amount ?? 0);
+            }
             acc.count += 1;
             return acc;
           },
           { ...EMPTY_SUMMARY },
         );
+
+        (ledgerRes.data ?? []).forEach((entry) => {
+          const ledger = entry as LedgerRow;
+          if (ledger.transaction_id) return;
+          const amount = Number(ledger.amount);
+          if (ledger.kind === "debt_payment" || ledger.kind === "deposit_add") {
+            summary.cashIn += amount;
+          } else if (ledger.kind === "deposit_refund") {
+            summary.cashIn -= amount;
+          }
+        });
 
         const weekStart = startOfDay(
           new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000),
@@ -103,9 +149,7 @@ export default function DashboardPage() {
         const dayLabels: string[] = [];
         for (let i = 6; i >= 0; i -= 1) {
           const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-          dayKeys.push(
-            `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`,
-          );
+          dayKeys.push(`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
           dayLabels.push(
             new Intl.DateTimeFormat("id-ID", {
               day: "numeric",
@@ -116,8 +160,12 @@ export default function DashboardPage() {
 
         const totals = new Map<string, number>();
         (weekRows ?? []).forEach((row) => {
-          const r = row as { type: TransactionType; total: number; created_at: string };
-          if (r.type === "expense") return;
+          const r = row as {
+            type: string;
+            total: number;
+            created_at: string;
+          };
+          if (r.type !== "sale") return;
           const d = new Date(r.created_at);
           const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
           totals.set(key, (totals.get(key) ?? 0) + Number(r.total));
@@ -133,9 +181,7 @@ export default function DashboardPage() {
         }
       } catch (err) {
         if (active) {
-          setError(
-            err instanceof Error ? err.message : "Gagal memuat data dashboard.",
-          );
+          setError(getErrorMessage(err, "Gagal memuat data dashboard."));
         }
       } finally {
         if (active) setLoading(false);
@@ -148,7 +194,7 @@ export default function DashboardPage() {
     };
   }, []);
 
-  const profit = today.income - today.expense;
+  const profit = today.sales + today.manualIncome - today.expense;
   const greeting = getGreeting();
 
   return (
@@ -181,12 +227,19 @@ export default function DashboardPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-5">
         <SummaryCard
-          label="Pemasukan hari ini"
-          value={formatRupiah(today.income)}
-          icon={<ArrowDownLeft className="h-5 w-5" />}
+          label="Penjualan hari ini"
+          value={formatRupiah(today.sales)}
+          icon={<ShoppingCart className="h-5 w-5" />}
           tone="emerald"
+          loading={loading}
+        />
+        <SummaryCard
+          label="Kas masuk hari ini"
+          value={formatRupiah(today.cashIn)}
+          icon={<Banknote className="h-5 w-5" />}
+          tone="sky"
           loading={loading}
         />
         <SummaryCard
@@ -200,14 +253,14 @@ export default function DashboardPage() {
           label="Laba hari ini"
           value={formatRupiah(profit)}
           icon={<TrendingUp className="h-5 w-5" />}
-          tone="sky"
+          tone="amber"
           loading={loading}
         />
         <SummaryCard
           label="Jumlah transaksi"
           value={String(today.count)}
           icon={<ReceiptText className="h-5 w-5" />}
-          tone="amber"
+          tone="slate"
           loading={loading}
         />
       </div>
@@ -220,7 +273,7 @@ export default function DashboardPage() {
                 Penjualan 7 hari terakhir
               </h2>
               <p className="text-sm text-slate-500">
-                Total pemasukan harian
+                Total penjualan harian
               </p>
             </div>
             <Wallet className="h-5 w-5 text-slate-300" />
@@ -301,7 +354,7 @@ function SummaryCard({
   label: string;
   value: string;
   icon: React.ReactNode;
-  tone: "emerald" | "rose" | "sky" | "amber";
+  tone: "emerald" | "rose" | "sky" | "amber" | "slate";
   loading: boolean;
 }) {
   const tones: Record<string, string> = {
@@ -309,6 +362,7 @@ function SummaryCard({
     rose: "bg-rose-50 text-rose-600",
     sky: "bg-sky-50 text-sky-600",
     amber: "bg-amber-50 text-amber-600",
+    slate: "bg-slate-100 text-slate-600",
   };
 
   return (

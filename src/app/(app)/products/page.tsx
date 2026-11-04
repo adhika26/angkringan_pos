@@ -11,6 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { getErrorMessage } from "@/lib/error";
 import { formatRupiah } from "@/lib/format";
 import type { Category, Product } from "@/lib/types";
 
@@ -89,7 +90,7 @@ export default function ProductsPage() {
         }
       } catch (err) {
         if (active) {
-          setError(err instanceof Error ? err.message : "Gagal memuat produk.");
+          setError(getErrorMessage(err, "Gagal memuat produk."));
         }
       } finally {
         if (active) setLoading(false);
@@ -183,7 +184,7 @@ export default function ProductsPage() {
       setNotice(form.id ? "Produk diperbarui." : "Produk ditambahkan.");
       setRefreshKey((key) => key + 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Gagal menyimpan produk.");
+      setError(getErrorMessage(err, "Gagal menyimpan produk."));
     } finally {
       setSaving(false);
     }
@@ -199,7 +200,7 @@ export default function ProductsPage() {
       if (error) throw error;
       setRefreshKey((key) => key + 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Gagal mengubah status.");
+      setError(getErrorMessage(err, "Gagal mengubah status."));
     }
   }
 
@@ -215,7 +216,7 @@ export default function ProductsPage() {
       setNotice("Produk dihapus.");
       setRefreshKey((key) => key + 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Gagal menghapus produk.");
+      setError(getErrorMessage(err, "Gagal menghapus produk."));
     }
   }
 
@@ -233,7 +234,7 @@ export default function ProductsPage() {
       setNotice("Kategori ditambahkan.");
       setRefreshKey((key) => key + 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Gagal menambah kategori.");
+      setError(getErrorMessage(err, "Gagal menambah kategori."));
     }
   }
 
@@ -254,7 +255,7 @@ export default function ProductsPage() {
       if (error) throw error;
       setRefreshKey((key) => key + 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Gagal menghapus kategori.");
+      setError(getErrorMessage(err, "Gagal menghapus kategori."));
     }
   }
 

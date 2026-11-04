@@ -12,15 +12,51 @@ import {
   Search,
   ShoppingCart,
   Trash2,
+  User,
+  Wallet,
   X,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { getErrorMessage } from "@/lib/error";
 import { formatRupiah } from "@/lib/format";
-import type { CartItem, Category, PaymentMethod, Product } from "@/lib/types";
+import {
+  calculateCheckout,
+  type CheckoutCalculation,
+} from "@/lib/payment";
+import type {
+  CartItem,
+  Category,
+  CheckoutResult,
+  Customer,
+  OverpaymentAction,
+  PaymentMethod,
+  Product,
+} from "@/lib/types";
+
+interface AccountBalance {
+  debt_balance: number;
+  deposit_balance: number;
+}
+
+interface CustomerCheckoutProps {
+  query: string;
+  onQueryChange: (value: string) => void;
+  options: Customer[];
+  matched: Customer | null;
+  oldDebt: number;
+  depositBalance: number;
+  useDeposit: boolean;
+  onUseDepositChange: (value: boolean) => void;
+  overpaymentAction: OverpaymentAction;
+  onOverpaymentActionChange: (value: OverpaymentAction) => void;
+  calc: CheckoutCalculation;
+}
 
 export default function PosPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [accounts, setAccounts] = useState<Record<number, AccountBalance>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -29,6 +65,10 @@ export default function PosPage() {
   const [payment, setPayment] = useState<PaymentMethod>("cash");
   const [note, setNote] = useState("");
   const [cashReceived, setCashReceived] = useState("");
+  const [customerQuery, setCustomerQuery] = useState("");
+  const [useDeposit, setUseDeposit] = useState(true);
+  const [overpaymentAction, setOverpaymentAction] =
+    useState<OverpaymentAction>("change");
   const [submitting, setSubmitting] = useState(false);
   const [cartOpen, setCartOpen] = useState(false);
   const [success, setSuccess] = useState<string | null>(null);
@@ -39,30 +79,40 @@ export default function PosPage() {
     async function load() {
       try {
         const supabase = createClient();
-        const [productsRes, categoriesRes] = await Promise.all([
-          supabase
-            .from("products")
-            .select("id, name, category_id, price, stock, is_active")
-            .eq("is_active", true)
-            .order("name", { ascending: true }),
-          supabase
-            .from("categories")
-            .select("id, name, sort_order")
-            .order("sort_order", { ascending: true }),
-        ]);
+        const [productsRes, categoriesRes, customersRes, accountsRes] =
+          await Promise.all([
+            supabase
+              .from("products")
+              .select("id, name, category_id, price, stock, is_active")
+              .eq("is_active", true)
+              .order("name", { ascending: true }),
+            supabase
+              .from("categories")
+              .select("id, name, sort_order")
+              .order("sort_order", { ascending: true }),
+            supabase
+              .from("customers")
+              .select("id, name, phone")
+              .order("name", { ascending: true }),
+            supabase
+              .from("customer_accounts")
+              .select("customer_id, debt_balance, deposit_balance"),
+          ]);
 
         if (productsRes.error) throw productsRes.error;
         if (categoriesRes.error) throw categoriesRes.error;
+        if (customersRes.error) throw customersRes.error;
+        if (accountsRes.error) throw accountsRes.error;
 
         if (active) {
           setProducts((productsRes.data ?? []) as Product[]);
           setCategories((categoriesRes.data ?? []) as Category[]);
+          setCustomers((customersRes.data ?? []) as Customer[]);
+          setAccounts(buildAccountMap(accountsRes.data));
         }
       } catch (err) {
         if (active) {
-          setError(
-            err instanceof Error ? err.message : "Gagal memuat daftar produk.",
-          );
+          setError(getErrorMessage(err, "Gagal memuat daftar produk."));
         }
       } finally {
         if (active) setLoading(false);
@@ -76,7 +126,11 @@ export default function PosPage() {
   }, []);
 
   const total = useMemo(
-    () => cart.reduce((sum, item) => sum + Number(item.product.price) * item.qty, 0),
+    () =>
+      cart.reduce(
+        (sum, item) => sum + Number(item.product.price) * item.qty,
+        0,
+      ),
     [cart],
   );
 
@@ -99,6 +153,66 @@ export default function PosPage() {
     const used = new Set(products.map((p) => p.category_id));
     return categories.filter((c) => used.has(c.id));
   }, [products, categories]);
+
+  const matchedCustomer = useMemo(() => {
+    const key = customerQuery.trim().toLowerCase();
+    if (!key) return null;
+    return (
+      customers.find((customer) => customer.name.trim().toLowerCase() === key) ??
+      null
+    );
+  }, [customers, customerQuery]);
+
+  const matchedAccount = matchedCustomer
+    ? accounts[matchedCustomer.id]
+    : undefined;
+  const oldDebt = matchedAccount ? Number(matchedAccount.debt_balance) : 0;
+  const depositBalance = matchedAccount
+    ? Number(matchedAccount.deposit_balance)
+    : 0;
+  const hasCustomer = customerQuery.trim().length > 0;
+  const cashValue = cashReceived.trim() === "" ? null : Number(cashReceived);
+
+  const calc = useMemo(
+    () =>
+      calculateCheckout({
+        total,
+        oldDebt,
+        depositBalance,
+        useDeposit,
+        cashReceived: cashValue,
+        overpaymentAction,
+        hasCustomer,
+      }),
+    [
+      total,
+      oldDebt,
+      depositBalance,
+      useDeposit,
+      cashValue,
+      overpaymentAction,
+      hasCustomer,
+    ],
+  );
+
+  async function refreshCustomers() {
+    const supabase = createClient();
+    const [customersRes, accountsRes] = await Promise.all([
+      supabase
+        .from("customers")
+        .select("id, name, phone")
+        .order("name", { ascending: true }),
+      supabase
+        .from("customer_accounts")
+        .select("customer_id, debt_balance, deposit_balance"),
+    ]);
+
+    if (customersRes.error) throw customersRes.error;
+    if (accountsRes.error) throw accountsRes.error;
+
+    setCustomers((customersRes.data ?? []) as Customer[]);
+    setAccounts(buildAccountMap(accountsRes.data));
+  }
 
   function addToCart(product: Product) {
     setSuccess(null);
@@ -136,6 +250,14 @@ export default function PosPage() {
     setCart((prev) => prev.filter((item) => item.product.id !== productId));
   }
 
+  function handleCustomerChange(value: string) {
+    setCustomerQuery(value);
+    setSuccess(null);
+    if (!value.trim()) {
+      setOverpaymentAction("change");
+    }
+  }
+
   function resetCart() {
     setCart([]);
     setNote("");
@@ -147,31 +269,30 @@ export default function PosPage() {
     if (cart.length === 0 || submitting) return;
     setError(null);
 
-    if (payment === "cash" && cashReceived) {
-      if (Number(cashReceived) < total) {
-        setError("Uang diterima kurang dari total belanja.");
-        return;
-      }
+    if (calc.error) {
+      setError(calc.error);
+      return;
     }
 
     setSubmitting(true);
     try {
       const supabase = createClient();
-      const { data, error } = await supabase.rpc("create_sale", {
+      const { data, error } = await supabase.rpc("checkout_sale", {
         p_items: cart.map((item) => ({
           product_id: item.product.id,
           qty: item.qty,
         })),
         p_payment_method: payment,
         p_note: note.trim() || null,
+        p_customer_name: customerQuery.trim() || null,
+        p_cash_received: cashValue,
+        p_overpayment_action: overpaymentAction,
+        p_use_deposit: useDeposit && Boolean(matchedCustomer),
       });
 
       if (error) throw error;
 
-      const change =
-        payment === "cash" && cashReceived
-          ? Number(cashReceived) - total
-          : 0;
+      const result = data as CheckoutResult;
 
       setProducts((prev) =>
         prev.map((product) => {
@@ -182,19 +303,65 @@ export default function PosPage() {
         }),
       );
 
-      setSuccess(
-        `Pembayaran berhasil${data ? ` #${data}` : ""}. Total ${formatRupiah(
-          total,
-        )}${change > 0 ? ` · Kembalian ${formatRupiah(change)}` : ""}`,
-      );
+      try {
+        await refreshCustomers();
+      } catch {
+        // Saldo akan termuat ulang saat halaman dibuka berikutnya.
+      }
+
+      const parts = [
+        `Pembayaran berhasil${result.transaction_id ? ` #${result.transaction_id}` : ""}`,
+        `Total ${formatRupiah(result.total)}`,
+      ];
+
+      if (result.deposit_used > 0) {
+        parts.push(`Deposit ${formatRupiah(result.deposit_used)}`);
+      }
+      if (result.change_amount > 0) {
+        parts.push(`Kembalian ${formatRupiah(result.change_amount)}`);
+      }
+      if (result.debt_added > 0) {
+        parts.push(`Hutang baru ${formatRupiah(result.debt_added)}`);
+      }
+      if (result.debt_paid > 0) {
+        parts.push(`Hutang lama dibayar ${formatRupiah(result.debt_paid)}`);
+      }
+      if (result.deposit_added > 0) {
+        parts.push(`Deposit disimpan ${formatRupiah(result.deposit_added)}`);
+      }
+      if (result.new_debt_balance > 0) {
+        parts.push(`Sisa hutang ${formatRupiah(result.new_debt_balance)}`);
+      }
+      if (result.new_deposit_balance > 0) {
+        parts.push(`Saldo deposit ${formatRupiah(result.new_deposit_balance)}`);
+      }
+
+      setSuccess(parts.join(" · "));
       resetCart();
+      setCustomerQuery("");
+      setUseDeposit(true);
+      setOverpaymentAction("change");
       setCartOpen(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Gagal menyimpan transaksi.");
+      setError(getErrorMessage(err, "Gagal menyimpan transaksi."));
     } finally {
       setSubmitting(false);
     }
   }
+
+  const customerCheckout: CustomerCheckoutProps = {
+    query: customerQuery,
+    onQueryChange: handleCustomerChange,
+    options: customers,
+    matched: matchedCustomer,
+    oldDebt,
+    depositBalance,
+    useDeposit,
+    onUseDepositChange: setUseDeposit,
+    overpaymentAction,
+    onOverpaymentActionChange: setOverpaymentAction,
+    calc,
+  };
 
   const cartBody = (
     <CartBody
@@ -206,6 +373,7 @@ export default function PosPage() {
       setNote={setNote}
       cashReceived={cashReceived}
       setCashReceived={setCashReceived}
+      customer={customerCheckout}
       onChangeQty={changeQty}
       onRemove={removeItem}
       onCheckout={handleCheckout}
@@ -380,6 +548,26 @@ export default function PosPage() {
   );
 }
 
+function buildAccountMap(
+  rows:
+    | {
+        customer_id: number;
+        debt_balance: number;
+        deposit_balance: number;
+      }[]
+    | null,
+) {
+  return Object.fromEntries(
+    (rows ?? []).map((row) => [
+      row.customer_id,
+      {
+        debt_balance: Number(row.debt_balance),
+        deposit_balance: Number(row.deposit_balance),
+      },
+    ]),
+  ) as Record<number, AccountBalance>;
+}
+
 function chipClass(active: boolean) {
   return `shrink-0 rounded-full px-4 py-2 text-sm font-medium transition ${
     active
@@ -415,6 +603,7 @@ function CartBody({
   setNote,
   cashReceived,
   setCashReceived,
+  customer,
   onChangeQty,
   onRemove,
   onCheckout,
@@ -429,20 +618,66 @@ function CartBody({
   setNote: (value: string) => void;
   cashReceived: string;
   setCashReceived: (value: string) => void;
+  customer: CustomerCheckoutProps;
   onChangeQty: (productId: number, delta: number) => void;
   onRemove: (productId: number) => void;
   onCheckout: () => void;
   onClear: () => void;
   submitting: boolean;
 }) {
-  const change =
-    payment === "cash" && cashReceived
-      ? Number(cashReceived) - total
-      : null;
+  const { calc } = customer;
+  const kekurangan = Math.max(calc.totalObligation - calc.cashReceived, 0);
+  const kelebihan = Math.max(calc.cashReceived - calc.totalObligation, 0);
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex-1 space-y-3 px-5 py-4">
+      <div className="flex-1 space-y-4 px-5 py-4">
+        <div>
+          <label htmlFor="customerName" className="label">
+            Pelanggan (opsional)
+          </label>
+          <div className="relative">
+            <User className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              id="customerName"
+              type="text"
+              list="customer-options"
+              value={customer.query}
+              onChange={(e) => customer.onQueryChange(e.target.value)}
+              placeholder="Cari atau ketik nama pelanggan..."
+              className="input pl-10"
+            />
+            <datalist id="customer-options">
+              {customer.options.map((option) => (
+                <option key={option.id} value={option.name} />
+              ))}
+            </datalist>
+          </div>
+          {customer.matched ? (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {customer.oldDebt > 0 && (
+                <span className="badge bg-rose-50 text-rose-700">
+                  Hutang {formatRupiah(customer.oldDebt)}
+                </span>
+              )}
+              {customer.depositBalance > 0 && (
+                <span className="badge bg-emerald-50 text-emerald-700">
+                  Deposit {formatRupiah(customer.depositBalance)}
+                </span>
+              )}
+              {customer.oldDebt <= 0 && customer.depositBalance <= 0 && (
+                <span className="text-xs text-slate-400">
+                  Tidak ada hutang atau deposit.
+                </span>
+              )}
+            </div>
+          ) : customer.query.trim() ? (
+            <p className="mt-1.5 text-xs text-slate-500">
+              Pelanggan baru akan dibuat saat transaksi disimpan.
+            </p>
+          ) : null}
+        </div>
+
         {cart.length === 0 ? (
           <div className="flex h-40 flex-col items-center justify-center text-center">
             <ShoppingCart className="h-9 w-9 text-slate-200" />
@@ -450,48 +685,50 @@ function CartBody({
             <p className="text-xs text-slate-400">Pilih menu di sebelah kiri.</p>
           </div>
         ) : (
-          cart.map((item) => (
-            <div key={item.product.id} className="flex items-start gap-3">
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium text-slate-800">
-                  {item.product.name}
-                </p>
-                <p className="text-xs text-slate-400">
-                  {formatRupiah(item.product.price)} × {item.qty}
-                </p>
+          <div className="space-y-3">
+            {cart.map((item) => (
+              <div key={item.product.id} className="flex items-start gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium text-slate-800">
+                    {item.product.name}
+                  </p>
+                  <p className="text-xs text-slate-400">
+                    {formatRupiah(item.product.price)} × {item.qty}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => onChangeQty(item.product.id, -1)}
+                    className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
+                    aria-label="Kurangi"
+                  >
+                    <Minus className="h-3.5 w-3.5" />
+                  </button>
+                  <span className="w-6 text-center text-sm font-semibold text-slate-800">
+                    {item.qty}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onChangeQty(item.product.id, 1)}
+                    disabled={item.qty >= item.product.stock}
+                    className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                    aria-label="Tambah"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRemove(item.product.id)}
+                    className="ml-1 rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+                    aria-label="Hapus"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => onChangeQty(item.product.id, -1)}
-                  className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
-                  aria-label="Kurangi"
-                >
-                  <Minus className="h-3.5 w-3.5" />
-                </button>
-                <span className="w-6 text-center text-sm font-semibold text-slate-800">
-                  {item.qty}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => onChangeQty(item.product.id, 1)}
-                  disabled={item.qty >= item.product.stock}
-                  className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-40"
-                  aria-label="Tambah"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onRemove(item.product.id)}
-                  className="ml-1 rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
-                  aria-label="Hapus"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              </div>
-            </div>
-          ))
+            ))}
+          </div>
         )}
       </div>
 
@@ -518,27 +755,147 @@ function CartBody({
           </div>
         </div>
 
-        {payment === "cash" && (
-          <div>
-            <label htmlFor="cashReceived" className="label">
-              Uang diterima (opsional)
-            </label>
+        {customer.matched && customer.depositBalance > 0 && (
+          <label className="flex items-center gap-2 rounded-xl bg-emerald-50 px-3.5 py-2.5 text-sm font-medium text-emerald-800">
             <input
-              id="cashReceived"
-              type="number"
-              min={0}
-              inputMode="numeric"
-              value={cashReceived}
-              onChange={(e) => setCashReceived(e.target.value)}
-              placeholder="Contoh: 50000"
-              className="input"
+              type="checkbox"
+              checked={customer.useDeposit}
+              onChange={(e) => customer.onUseDepositChange(e.target.checked)}
+              className="h-4 w-4 rounded border-emerald-300 text-emerald-600 focus:ring-emerald-500"
             />
-            {change !== null && change >= 0 && (
-              <p className="mt-1.5 text-xs font-medium text-emerald-600">
-                Kembalian: {formatRupiah(change)}
+            Gunakan deposit ({formatRupiah(customer.depositBalance)})
+          </label>
+        )}
+
+        <div>
+          <label htmlFor="cashReceived" className="label">
+            Uang diterima / nominal dibayar
+          </label>
+          <input
+            id="cashReceived"
+            type="number"
+            min={0}
+            inputMode="numeric"
+            value={cashReceived}
+            onChange={(e) => setCashReceived(e.target.value)}
+            placeholder="Kosongkan jika uang pas"
+            className="input"
+          />
+        </div>
+
+        <div className="space-y-1.5 rounded-xl bg-slate-50 px-4 py-3 text-sm">
+          <SummaryRow label="Total belanja" value={formatRupiah(total)} />
+          {calc.depositUsed > 0 && (
+            <SummaryRow
+              label="Deposit dipakai"
+              value={`- ${formatRupiah(calc.depositUsed)}`}
+              tone="emerald"
+            />
+          )}
+          {customer.oldDebt > 0 && (
+            <SummaryRow
+              label="Hutang lama"
+              value={formatRupiah(customer.oldDebt)}
+              tone="rose"
+            />
+          )}
+          {(customer.oldDebt > 0 || calc.depositUsed > 0) && (
+            <SummaryRow
+              label="Total kewajiban"
+              value={formatRupiah(calc.totalObligation)}
+              bold
+            />
+          )}
+          <SummaryRow
+            label={
+              cashReceived.trim() === ""
+                ? "Uang diterima (pas belanja)"
+                : "Uang diterima"
+            }
+            value={formatRupiah(calc.cashReceived)}
+          />
+          {kekurangan > 0 && (
+            <SummaryRow
+              label="Kekurangan"
+              value={formatRupiah(kekurangan)}
+              tone="amber"
+              bold
+            />
+          )}
+          {kelebihan > 0 && (
+            <SummaryRow
+              label="Kelebihan"
+              value={formatRupiah(kelebihan)}
+              tone="sky"
+              bold
+            />
+          )}
+          {calc.change > 0 && (
+            <SummaryRow
+              label="Kembalian"
+              value={formatRupiah(calc.change)}
+              tone="emerald"
+              bold
+            />
+          )}
+          {calc.depositAdded > 0 && (
+            <SummaryRow
+              label="Deposit disimpan"
+              value={formatRupiah(calc.depositAdded)}
+              tone="emerald"
+              bold
+            />
+          )}
+          {calc.debtPaid > 0 && (
+            <SummaryRow
+              label="Hutang lama dibayar"
+              value={formatRupiah(calc.debtPaid)}
+              tone="emerald"
+            />
+          )}
+          {customer.query.trim() && (
+            <SummaryRow
+              label="Hutang setelah transaksi"
+              value={formatRupiah(calc.newDebt)}
+              tone={calc.newDebt > 0 ? "rose" : "emerald"}
+              bold
+            />
+          )}
+        </div>
+
+        {kelebihan > 0 && (
+          <div>
+            <p className="label">Kelebihan uang</p>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => customer.onOverpaymentActionChange("change")}
+                className={overpayClass(customer.overpaymentAction === "change")}
+              >
+                Kembalikan
+              </button>
+              <button
+                type="button"
+                onClick={() => customer.onOverpaymentActionChange("deposit")}
+                disabled={!customer.query.trim()}
+                className={overpayClass(
+                  customer.overpaymentAction === "deposit",
+                )}
+              >
+                <Wallet className="h-4 w-4" />
+                Simpan deposit
+              </button>
+            </div>
+            {!customer.query.trim() && (
+              <p className="mt-1.5 text-xs text-amber-600">
+                Isi nama pelanggan untuk menyimpan kelebihan sebagai deposit.
               </p>
             )}
           </div>
+        )}
+
+        {calc.error && (
+          <p className="text-xs font-medium text-rose-600">{calc.error}</p>
         )}
 
         <div>
@@ -555,13 +912,6 @@ function CartBody({
           />
         </div>
 
-        <div className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-3">
-          <span className="text-sm font-medium text-slate-600">Total</span>
-          <span className="text-lg font-bold text-slate-900">
-            {formatRupiah(total)}
-          </span>
-        </div>
-
         <div className="flex gap-2">
           <button
             type="button"
@@ -574,7 +924,7 @@ function CartBody({
           <button
             type="button"
             onClick={onCheckout}
-            disabled={cart.length === 0 || submitting}
+            disabled={cart.length === 0 || submitting || Boolean(calc.error)}
             className="btn-primary flex-1"
           >
             {submitting ? (
@@ -590,10 +940,50 @@ function CartBody({
   );
 }
 
+function SummaryRow({
+  label,
+  value,
+  tone,
+  bold = false,
+}: {
+  label: string;
+  value: string;
+  tone?: "emerald" | "rose" | "amber" | "sky";
+  bold?: boolean;
+}) {
+  const tones: Record<string, string> = {
+    emerald: "text-emerald-600",
+    rose: "text-rose-600",
+    amber: "text-amber-600",
+    sky: "text-sky-600",
+  };
+
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-slate-500">{label}</span>
+      <span
+        className={`${bold ? "font-semibold" : ""} ${
+          tone ? tones[tone] : "text-slate-800"
+        }`}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
 function payClass(active: boolean) {
   return `flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-sm font-semibold transition ${
     active
       ? "border-emerald-600 bg-emerald-50 text-emerald-700"
       : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+  }`;
+}
+
+function overpayClass(active: boolean) {
+  return `flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-sm font-semibold transition ${
+    active
+      ? "border-emerald-600 bg-emerald-50 text-emerald-700"
+      : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-40"
   }`;
 }

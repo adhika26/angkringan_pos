@@ -14,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { getErrorMessage } from "@/lib/error";
 import {
   endOfDay,
   formatDateTime,
@@ -81,7 +82,7 @@ export default function TransactionsPage() {
         let query = supabase
           .from("transactions")
           .select(
-            "id, type, total, payment_method, category, note, cashier_id, cashier_name, created_at, transaction_items(id, product_name, qty, price, subtotal)",
+            "id, type, total, payment_method, category, note, cashier_id, cashier_name, customer_id, cash_received, change_amount, deposit_used, debt_added, debt_paid, deposit_added, created_at, customers(name), transaction_items(id, product_name, qty, price, subtotal)",
           )
           .gte("created_at", start)
           .lte("created_at", end)
@@ -95,7 +96,7 @@ export default function TransactionsPage() {
         if (active) setRows((data ?? []) as unknown as Row[]);
       } catch (err) {
         if (active) {
-          setError(err instanceof Error ? err.message : "Gagal memuat transaksi.");
+          setError(getErrorMessage(err, "Gagal memuat transaksi."));
         }
       } finally {
         if (active) setLoading(false);
@@ -147,7 +148,7 @@ export default function TransactionsPage() {
       if (error) throw error;
       setRefreshKey((key) => key + 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Gagal menghapus transaksi.");
+      setError(getErrorMessage(err, "Gagal menghapus transaksi."));
     }
   }
 
@@ -439,8 +440,48 @@ export default function TransactionsPage() {
                   label="Kasir"
                   value={selected.cashier_name ?? "-"}
                 />
+                <DetailRow label="Pelanggan" value={customerName(selected)} />
                 <DetailRow label="Catatan" value={selected.note ?? "-"} />
               </dl>
+
+              {(Number(selected.deposit_used) > 0 ||
+                Number(selected.debt_added) > 0 ||
+                Number(selected.debt_paid) > 0 ||
+                Number(selected.deposit_added) > 0 ||
+                Number(selected.change_amount) > 0) && (
+                <div className="space-y-2 rounded-xl bg-slate-50 p-3 text-sm">
+                  {Number(selected.deposit_used) > 0 && (
+                    <DetailRow
+                      label="Deposit dipakai"
+                      value={formatRupiah(selected.deposit_used)}
+                    />
+                  )}
+                  {Number(selected.debt_added) > 0 && (
+                    <DetailRow
+                      label="Hutang baru"
+                      value={formatRupiah(selected.debt_added)}
+                    />
+                  )}
+                  {Number(selected.debt_paid) > 0 && (
+                    <DetailRow
+                      label="Hutang lama dibayar"
+                      value={formatRupiah(selected.debt_paid)}
+                    />
+                  )}
+                  {Number(selected.deposit_added) > 0 && (
+                    <DetailRow
+                      label="Deposit disimpan"
+                      value={formatRupiah(selected.deposit_added)}
+                    />
+                  )}
+                  {Number(selected.change_amount) > 0 && (
+                    <DetailRow
+                      label="Kembalian"
+                      value={formatRupiah(selected.change_amount)}
+                    />
+                  )}
+                </div>
+              )}
 
               <div className="flex items-center justify-between rounded-xl bg-slate-900 px-4 py-3 text-white">
                 <span className="text-sm">Total</span>
@@ -511,6 +552,12 @@ function DetailRow({ label, value }: { label: string; value: string }) {
       <dd className="text-right font-medium text-slate-800">{value}</dd>
     </div>
   );
+}
+
+function customerName(row: Row) {
+  const customer = row.customers;
+  if (Array.isArray(customer)) return customer[0]?.name ?? "-";
+  return customer?.name ?? "-";
 }
 
 function describe(row: Row) {

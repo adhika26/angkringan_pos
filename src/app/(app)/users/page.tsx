@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Loader2, ShieldCheck, UserRound } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { getErrorMessage } from "@/lib/error";
 import { formatDate } from "@/lib/format";
 import type { Profile, Role } from "@/lib/types";
 
@@ -46,7 +47,7 @@ export default function UsersPage() {
         if (active) setProfiles((data ?? []) as Profile[]);
       } catch (err) {
         if (active) {
-          setError(err instanceof Error ? err.message : "Gagal memuat pengguna.");
+          setError(getErrorMessage(err, "Gagal memuat pengguna."));
         }
       } finally {
         if (active) setLoading(false);
@@ -71,7 +72,7 @@ export default function UsersPage() {
       if (error) throw error;
       setRefreshKey((key) => key + 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Gagal mengubah role.");
+      setError(getErrorMessage(err, "Gagal mengubah role."));
     } finally {
       setSavingId(null);
     }

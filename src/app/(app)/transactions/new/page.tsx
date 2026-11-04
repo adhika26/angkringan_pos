@@ -11,6 +11,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { getErrorMessage } from "@/lib/error";
 import { toDateInput } from "@/lib/format";
 import type { PaymentMethod, TransactionType } from "@/lib/types";
 
@@ -105,7 +106,7 @@ export default function NewTransactionPage() {
       setTotal("");
       setNote("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Gagal menyimpan transaksi.");
+      setError(getErrorMessage(err, "Gagal menyimpan transaksi."));
     } finally {
       setLoading(false);
     }

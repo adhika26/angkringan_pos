@@ -9,7 +9,7 @@ Aplikasi kasir (POS) dan pembukuan sederhana untuk UMKM angkringan/warung.
 - **Riwayat transaksi**: filter tanggal, jenis, pencarian, dan detail item.
 - **Dashboard**: ringkasan pemasukan/pengeluaran/laba hari ini + grafik penjualan 7 hari.
 - **Laporan**: rekap harian & bulanan, grafik, dan **export Excel**.
-- **Hutang & piutang**: utang ke supplier dan piutang pelanggan, lengkap dengan cicilan.
+- **Hutang pelanggan & deposit**: kekurangan bayar otomatis jadi hutang, tambah hutang manual, pembayaran hutang, saldo deposit, edit/gabung nama pelanggan, dan koreksi saldo dengan riwayat.
 - **Multi-user**: role **Owner** dan **Kasir**.
 - **Kelola produk & kategori**.
 
@@ -30,6 +30,12 @@ Aplikasi kasir (POS) dan pembukuan sederhana untuk UMKM angkringan/warung.
 1. Buka [supabase.com](https://supabase.com) lalu buat project baru.
 2. Masuk ke **SQL Editor**, buka file `supabase/schema.sql`, salin seluruh isinya, lalu **Run**.
 3. Masih di SQL Editor, buka `supabase/seed.sql`, salin, lalu **Run** (mengisi contoh menu angkringan).
+
+> **Sudah punya database lama?** Jangan jalankan ulang `schema.sql`. Backup dulu, lalu jalankan file migrasi di `supabase/migrations/` secara berurutan:
+> 1. `20261104_customer_debt_deposit.sql`
+> 2. `20261104_customer_corrections.sql`
+>
+> Keduanya aman dijalankan berulang.
 4. Buka **Project Settings > API**, catat:
    - `Project URL`
    - `anon public key`
@@ -64,6 +70,15 @@ Buka [http://localhost:3000](http://localhost:3000).
 
 ---
 
+## Reset Data Dummy
+
+Untuk menghapus data transaksi, pelanggan, hutang/deposit, dan data dummy lainnya **tanpa menghapus produk, kategori, dan akun pengguna**:
+
+1. Backup database Supabase.
+2. Buka **SQL Editor**, jalankan file `supabase/reset_data.sql`.
+
+> Skrip ini menghapus permanen. Produk dan kategori tetap dipertahankan.
+
 ## Catatan
 
 - **QRIS** pada tahap ini hanya mencatat metode pembayaran (belum terhubung payment gateway).
@@ -88,6 +103,7 @@ src/
 supabase/
   schema.sql          # tabel, RLS, fungsi transaksi
   seed.sql            # contoh menu
+  migrations/         # migrasi untuk database yang sudah berjalan
 ```
 
 ## Skrip

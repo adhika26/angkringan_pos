@@ -12,6 +12,7 @@ import {
   UtensilsCrossed,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { getErrorMessage } from "@/lib/error";
 
 const configured = Boolean(
   process.env.NEXT_PUBLIC_SUPABASE_URL &&
@@ -72,7 +73,7 @@ export default function LoginPage() {
       }
     } catch (err) {
       const message =
-        err instanceof Error ? err.message : "Terjadi kesalahan, coba lagi.";
+        getErrorMessage(err, "Terjadi kesalahan, coba lagi.");
       setError(translateError(message));
     } finally {
       setLoading(false);
@@ -104,7 +105,7 @@ export default function LoginPage() {
               "Kasir cepat dengan keranjang dan pembayaran tunai/QRIS",
               "Pemasukan & pengeluaran tercatat otomatis",
               "Laporan harian, bulanan, dan grafik penjualan",
-              "Kelola utang supplier dan piutang pelanggan",
+              "Kelola hutang pelanggan dan deposit dalam satu tempat",
             ].map((item) => (
               <li key={item} className="flex items-start gap-3">
                 <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" />

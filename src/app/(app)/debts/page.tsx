@@ -5,27 +5,51 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   CheckCircle2,
-  ChevronDown,
+  History,
   Loader2,
+  Pencil,
   Plus,
+  Search,
+  SlidersHorizontal,
   Wallet,
   X,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
-import { formatDate, formatRupiah } from "@/lib/format";
-import type { Debt, DebtDirection, DebtPayment } from "@/lib/types";
+import { getErrorMessage } from "@/lib/error";
+import { formatDateTime, formatRupiah } from "@/lib/format";
+import type {
+  AdjustmentAccount,
+  AdjustmentDirection,
+  Customer,
+  CustomerAccount,
+  CustomerLedgerEntry,
+  CustomerLedgerKind,
+} from "@/lib/types";
 
-type DebtRow = Debt & { debt_payments?: DebtPayment[] };
+type AccountRow = CustomerAccount & {
+  customers?: Customer | Customer[] | null;
+};
+
+type Tab = "debt" | "deposit";
+type DepositMode = "add" | "refund";
 
 export default function DebtsPage() {
-  const [debts, setDebts] = useState<DebtRow[]>([]);
+  const [accounts, setAccounts] = useState<AccountRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [role, setRole] = useState<"owner" | "cashier">("cashier");
-  const [direction, setDirection] = useState<DebtDirection>("payable");
-  const [addOpen, setAddOpen] = useState(false);
-  const [payTarget, setPayTarget] = useState<DebtRow | null>(null);
-  const [expanded, setExpanded] = useState<number | null>(null);
+  const [tab, setTab] = useState<Tab>("debt");
+  const [search, setSearch] = useState("");
+  const [showPaid, setShowPaid] = useState(false);
+  const [payTarget, setPayTarget] = useState<AccountRow | null>(null);
+  const [depositTarget, setDepositTarget] = useState<{
+    row: AccountRow;
+    mode: DepositMode;
+  } | null>(null);
+  const [historyTarget, setHistoryTarget] = useState<AccountRow | null>(null);
+  const [addDepositOpen, setAddDepositOpen] = useState(false);
+  const [addDebtOpen, setAddDebtOpen] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<AccountRow | null>(null);
+  const [adjustTarget, setAdjustTarget] = useState<AccountRow | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
@@ -33,35 +57,21 @@ export default function DebtsPage() {
 
     async function load() {
       setLoading(true);
+      setError(null);
       try {
         const supabase = createClient();
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-
-        if (user) {
-          const { data: profile } = await supabase
-            .from("profiles")
-            .select("role")
-            .eq("id", user.id)
-            .single();
-          if (active && profile?.role) {
-            setRole(profile.role as "owner" | "cashier");
-          }
-        }
-
         const { data, error } = await supabase
-          .from("debts")
+          .from("customer_accounts")
           .select(
-            "id, direction, party_name, description, amount, paid_amount, due_date, status, created_at, debt_payments(id, debt_id, amount, note, paid_at)",
+            "customer_id, debt_balance, deposit_balance, updated_at, customers(id, name, phone)",
           )
-          .order("created_at", { ascending: false });
+          .order("updated_at", { ascending: false });
 
         if (error) throw error;
-        if (active) setDebts((data ?? []) as unknown as DebtRow[]);
+        if (active) setAccounts((data ?? []) as unknown as AccountRow[]);
       } catch (err) {
         if (active) {
-          setError(err instanceof Error ? err.message : "Gagal memuat data hutang.");
+          setError(getErrorMessage(err, "Gagal memuat data hutang."));
         }
       } finally {
         if (active) setLoading(false);
@@ -75,42 +85,55 @@ export default function DebtsPage() {
   }, [refreshKey]);
 
   const summary = useMemo(() => {
-    let payable = 0;
-    let receivable = 0;
-    debts.forEach((debt) => {
-      const remaining = Number(debt.amount) - Number(debt.paid_amount);
-      if (debt.status === "paid" || remaining <= 0) return;
-      if (debt.direction === "payable") payable += remaining;
-      else receivable += remaining;
+    let debt = 0;
+    let deposit = 0;
+    accounts.forEach((row) => {
+      debt += Number(row.debt_balance);
+      deposit += Number(row.deposit_balance);
     });
-    return { payable, receivable };
-  }, [debts]);
+    return { debt, deposit };
+  }, [accounts]);
 
-  const filtered = useMemo(
-    () => debts.filter((debt) => debt.direction === direction),
-    [debts, direction],
-  );
+  const debtCount = accounts.filter((row) => Number(row.debt_balance) > 0).length;
+  const depositCount = accounts.filter(
+    (row) => Number(row.deposit_balance) > 0,
+  ).length;
 
-  async function refresh() {
+  const visible = useMemo(() => {
+    const keyword = search.trim().toLowerCase();
+    return accounts
+      .filter((row) => {
+        const name = customerName(row).toLowerCase();
+        if (keyword && !name.includes(keyword)) return false;
+        const balance =
+          tab === "debt"
+            ? Number(row.debt_balance)
+            : Number(row.deposit_balance);
+        return balance > 0 || showPaid;
+      })
+      .sort((a, b) => {
+        const aBalance =
+          tab === "debt" ? Number(a.debt_balance) : Number(a.deposit_balance);
+        const bBalance =
+          tab === "debt" ? Number(b.debt_balance) : Number(b.deposit_balance);
+        if (aBalance > 0 && bBalance <= 0) return -1;
+        if (aBalance <= 0 && bBalance > 0) return 1;
+        return customerName(a).localeCompare(customerName(b), "id");
+      });
+  }, [accounts, search, tab, showPaid]);
+
+  function refresh() {
     setRefreshKey((key) => key + 1);
   }
 
   function closeModals() {
-    setAddOpen(false);
     setPayTarget(null);
-  }
-
-  if (!loading && role !== "owner") {
-    return (
-      <div className="card card-pad">
-        <h1 className="text-lg font-semibold text-slate-900">
-          Hutang & Piutang
-        </h1>
-        <p className="mt-1 text-sm text-slate-500">
-          Halaman ini hanya dapat diakses oleh owner.
-        </p>
-      </div>
-    );
+    setDepositTarget(null);
+    setHistoryTarget(null);
+    setAddDepositOpen(false);
+    setAddDebtOpen(false);
+    setRenameTarget(null);
+    setAdjustTarget(null);
   }
 
   return (
@@ -118,20 +141,30 @@ export default function DebtsPage() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">
-            Hutang & Piutang
+            Hutang Pelanggan
           </h1>
           <p className="mt-1 text-sm text-slate-500">
-            Catat utang ke supplier dan piutang pelanggan, termasuk cicilannya.
+            Catat hutang pelanggan dan deposit, lengkap dengan riwayat.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setAddOpen(true)}
-          className="btn-primary"
-        >
-          <Plus className="h-4 w-4" />
-          Tambah Catatan
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => setAddDebtOpen(true)}
+            className="btn-secondary"
+          >
+            <Plus className="h-4 w-4" />
+            Tambah Hutang
+          </button>
+          <button
+            type="button"
+            onClick={() => setAddDepositOpen(true)}
+            className="btn-primary"
+          >
+            <Plus className="h-4 w-4" />
+            Tambah Deposit
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -146,10 +179,10 @@ export default function DebtsPage() {
             <ArrowUpRight className="h-5 w-5" />
           </div>
           <p className="text-xs font-medium text-slate-500 sm:text-sm">
-            Sisa utang ke supplier
+            Total hutang pelanggan
           </p>
           <p className="mt-1 truncate text-lg font-bold text-slate-900 sm:text-xl">
-            {formatRupiah(summary.payable)}
+            {formatRupiah(summary.debt)}
           </p>
         </div>
         <div className="card p-4 sm:p-5">
@@ -157,174 +190,202 @@ export default function DebtsPage() {
             <ArrowDownLeft className="h-5 w-5" />
           </div>
           <p className="text-xs font-medium text-slate-500 sm:text-sm">
-            Sisa piutang pelanggan
+            Total deposit pelanggan
           </p>
           <p className="mt-1 truncate text-lg font-bold text-slate-900 sm:text-xl">
-            {formatRupiah(summary.receivable)}
+            {formatRupiah(summary.deposit)}
           </p>
         </div>
       </div>
 
-      <div className="inline-flex rounded-xl bg-slate-100 p-1">
-        <button
-          type="button"
-          onClick={() => setDirection("payable")}
-          className={tabClass(direction === "payable")}
-        >
-          Utang (ke supplier)
-        </button>
-        <button
-          type="button"
-          onClick={() => setDirection("receivable")}
-          className={tabClass(direction === "receivable")}
-        >
-          Piutang (pelanggan)
-        </button>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="inline-flex rounded-xl bg-slate-100 p-1">
+          <button
+            type="button"
+            onClick={() => setTab("debt")}
+            className={tabClass(tab === "debt")}
+          >
+            Hutang ({debtCount})
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("deposit")}
+            className={tabClass(tab === "deposit")}
+          >
+            Deposit ({depositCount})
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <label className="flex items-center gap-2 text-sm text-slate-600">
+            <input
+              type="checkbox"
+              checked={showPaid}
+              onChange={(e) => setShowPaid(e.target.checked)}
+              className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+            />
+            Tampilkan riwayat lunas
+          </label>
+          <div className="relative w-full sm:w-64">
+            <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Cari nama pelanggan..."
+              className="input pl-10"
+            />
+          </div>
+        </div>
       </div>
 
       {loading ? (
         <div className="flex h-48 items-center justify-center">
           <Loader2 className="h-6 w-6 animate-spin text-emerald-500" />
         </div>
-      ) : filtered.length === 0 ? (
+      ) : visible.length === 0 ? (
         <div className="card flex h-56 flex-col items-center justify-center text-center">
           <Wallet className="h-10 w-10 text-slate-300" />
           <p className="mt-2 text-sm font-medium text-slate-600">
-            Belum ada catatan
+            Belum ada data
           </p>
           <p className="text-xs text-slate-400">
-            Tambahkan {direction === "payable" ? "utang supplier" : "piutang pelanggan"}.
+            {tab === "debt"
+              ? "Hutang pelanggan akan muncul otomatis dari transaksi kasir."
+              : "Tambahkan deposit pelanggan untuk mulai mencatat saldo."}
           </p>
         </div>
       ) : (
         <div className="space-y-3">
-          {filtered.map((debt) => {
-            const amount = Number(debt.amount);
-            const paid = Number(debt.paid_amount);
-            const remaining = Math.max(amount - paid, 0);
-            const progress = amount > 0 ? Math.min((paid / amount) * 100, 100) : 0;
-            const isOpen = expanded === debt.id;
-            const payments = [...(debt.debt_payments ?? [])].sort(
-              (a, b) => new Date(b.paid_at).getTime() - new Date(a.paid_at).getTime(),
-            );
+          {visible.map((row) => {
+            const name = customerName(row);
+            const balance =
+              tab === "debt"
+                ? Number(row.debt_balance)
+                : Number(row.deposit_balance);
+            const settled = balance <= 0;
 
             return (
-              <div key={debt.id} className="card overflow-hidden">
-                <div className="p-4 sm:p-5">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <p className="truncate text-base font-semibold text-slate-900">
-                          {debt.party_name}
-                        </p>
-                        {debt.status === "paid" ? (
-                          <span className="badge bg-emerald-100 text-emerald-700">
-                            <CheckCircle2 className="h-3 w-3" />
-                            Lunas
-                          </span>
-                        ) : (
-                          <span className="badge bg-amber-100 text-amber-700">
-                            Belum lunas
-                          </span>
-                        )}
-                      </div>
-                      {debt.description && (
-                        <p className="mt-0.5 text-sm text-slate-500">
-                          {debt.description}
-                        </p>
-                      )}
-                      {debt.due_date && (
-                        <p className="mt-1 text-xs text-slate-400">
-                          Jatuh tempo: {formatDate(debt.due_date)}
-                        </p>
-                      )}
-                    </div>
-                    <div className="text-right">
-                      <p className="text-xs text-slate-400">Sisa</p>
-                      <p className="text-lg font-bold text-slate-900">
-                        {formatRupiah(remaining)}
+              <div key={row.customer_id} className="card overflow-hidden">
+                <div className="flex flex-wrap items-start justify-between gap-3 p-4 sm:p-5">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="truncate text-base font-semibold text-slate-900">
+                        {name}
                       </p>
+                      {settled ? (
+                        <span className="badge bg-emerald-100 text-emerald-700">
+                          <CheckCircle2 className="h-3 w-3" />
+                          {tab === "debt" ? "Lunas" : "Tidak ada deposit"}
+                        </span>
+                      ) : tab === "debt" ? (
+                        <span className="badge bg-rose-100 text-rose-700">
+                          Belum lunas
+                        </span>
+                      ) : (
+                        <span className="badge bg-emerald-100 text-emerald-700">
+                          Deposit aktif
+                        </span>
+                      )}
                     </div>
-                  </div>
-
-                  <div className="mt-4">
-                    <div className="mb-1.5 flex justify-between text-xs text-slate-500">
-                      <span>Dibayar {formatRupiah(paid)}</span>
-                      <span>dari {formatRupiah(amount)}</span>
-                    </div>
-                    <div className="h-2 overflow-hidden rounded-full bg-slate-100">
-                      <div
-                        className={`h-full rounded-full ${
-                          debt.status === "paid" ? "bg-emerald-500" : "bg-amber-500"
-                        }`}
-                        style={{ width: `${progress}%` }}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {debt.status !== "paid" && (
-                      <button
-                        type="button"
-                        onClick={() => setPayTarget(debt)}
-                        className="btn-primary px-3 py-2 text-xs"
-                      >
-                        <Wallet className="h-3.5 w-3.5" />
-                        Catat Cicilan
-                      </button>
+                    {row.updated_at && (
+                      <p className="mt-1 text-xs text-slate-400">
+                        Diperbarui {formatDateTime(row.updated_at)}
+                      </p>
                     )}
-                    <button
-                      type="button"
-                      onClick={() => setExpanded(isOpen ? null : debt.id)}
-                      className="btn-secondary px-3 py-2 text-xs"
+                  </div>
+                  <div className="text-right">
+                    <p className="text-xs text-slate-400">
+                      {tab === "debt" ? "Sisa hutang" : "Saldo deposit"}
+                    </p>
+                    <p
+                      className={`text-lg font-bold ${
+                        tab === "debt"
+                          ? balance > 0
+                            ? "text-rose-600"
+                            : "text-emerald-600"
+                          : balance > 0
+                            ? "text-emerald-600"
+                            : "text-slate-400"
+                      }`}
                     >
-                      <ChevronDown
-                        className={`h-3.5 w-3.5 transition ${isOpen ? "rotate-180" : ""}`}
-                      />
-                      Riwayat ({payments.length})
-                    </button>
+                      {formatRupiah(balance)}
+                    </p>
                   </div>
                 </div>
 
-                {isOpen && (
-                  <div className="border-t border-slate-100 bg-slate-50/60 px-4 py-3 sm:px-5">
-                    {payments.length === 0 ? (
-                      <p className="text-sm text-slate-500">
-                        Belum ada cicilan yang dicatat.
-                      </p>
-                    ) : (
-                      <ul className="space-y-2">
-                        {payments.map((payment) => (
-                          <li
-                            key={payment.id}
-                            className="flex items-center justify-between gap-3 text-sm"
-                          >
-                            <div>
-                              <p className="font-medium text-slate-700">
-                                {formatRupiah(payment.amount)}
-                              </p>
-                              <p className="text-xs text-slate-400">
-                                {formatDate(payment.paid_at)}
-                                {payment.note ? ` · ${payment.note}` : ""}
-                              </p>
-                            </div>
-                            <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                )}
+                <div className="flex flex-wrap gap-2 border-t border-slate-100 bg-slate-50/60 px-4 py-3 sm:px-5">
+                  {tab === "debt" && balance > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setPayTarget(row)}
+                      className="btn-primary px-3 py-2 text-xs"
+                    >
+                      <Wallet className="h-3.5 w-3.5" />
+                      Bayar
+                    </button>
+                  )}
+                  {tab === "deposit" && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setDepositTarget({ row, mode: "add" })
+                        }
+                        className="btn-primary px-3 py-2 text-xs"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        Tambah
+                      </button>
+                      {balance > 0 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setDepositTarget({ row, mode: "refund" })
+                          }
+                          className="btn-secondary px-3 py-2 text-xs"
+                        >
+                          <ArrowDownLeft className="h-3.5 w-3.5" />
+                          Tarik
+                        </button>
+                      )}
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setRenameTarget(row)}
+                    className="btn-secondary px-3 py-2 text-xs"
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                    Edit Nama
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAdjustTarget(row)}
+                    className="btn-secondary px-3 py-2 text-xs"
+                  >
+                    <SlidersHorizontal className="h-3.5 w-3.5" />
+                    Koreksi
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryTarget(row)}
+                    className="btn-secondary px-3 py-2 text-xs"
+                  >
+                    <History className="h-3.5 w-3.5" />
+                    Riwayat
+                  </button>
+                </div>
               </div>
             );
           })}
         </div>
       )}
 
-      {addOpen && (
-        <AddDebtModal
+      {payTarget && (
+        <PayDebtModal
+          row={payTarget}
           onClose={closeModals}
-          initialDirection={direction}
           onSaved={() => {
             closeModals();
             refresh();
@@ -332,9 +393,60 @@ export default function DebtsPage() {
         />
       )}
 
-      {payTarget && (
-        <PayDebtModal
-          debt={payTarget}
+      {depositTarget && (
+        <DepositModal
+          row={depositTarget.row}
+          mode={depositTarget.mode}
+          onClose={closeModals}
+          onSaved={() => {
+            closeModals();
+            refresh();
+          }}
+        />
+      )}
+
+      {historyTarget && (
+        <HistoryModal row={historyTarget} onClose={closeModals} />
+      )}
+
+      {addDepositOpen && (
+        <AddDepositModal
+          accounts={accounts}
+          onClose={closeModals}
+          onSaved={() => {
+            closeModals();
+            refresh();
+          }}
+        />
+      )}
+
+      {addDebtOpen && (
+        <AddDebtModal
+          accounts={accounts}
+          onClose={closeModals}
+          onSaved={() => {
+            closeModals();
+            refresh();
+          }}
+        />
+      )}
+
+      {renameTarget && (
+        <RenameCustomerModal
+          row={renameTarget}
+          accounts={accounts}
+          onClose={closeModals}
+          onSaved={() => {
+            closeModals();
+            refresh();
+          }}
+        />
+      )}
+
+      {adjustTarget && (
+        <AdjustModal
+          row={adjustTarget}
+          defaultAccount={tab}
           onClose={closeModals}
           onSaved={() => {
             closeModals();
@@ -346,157 +458,23 @@ export default function DebtsPage() {
   );
 }
 
-function AddDebtModal({
-  onClose,
-  onSaved,
-  initialDirection,
-}: {
-  onClose: () => void;
-  onSaved: () => void;
-  initialDirection: DebtDirection;
-}) {
-  const [direction, setDirection] = useState<DebtDirection>(initialDirection);
-  const [party, setParty] = useState("");
-  const [description, setDescription] = useState("");
-  const [amount, setAmount] = useState("");
-  const [dueDate, setDueDate] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    const value = Number(amount);
-    if (!party.trim()) return setError("Nama pihak wajib diisi.");
-    if (!Number.isFinite(value) || value <= 0) {
-      return setError("Nominal harus lebih dari 0.");
-    }
-
-    setSaving(true);
-    try {
-      const supabase = createClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      const { error } = await supabase.from("debts").insert({
-        direction,
-        party_name: party.trim(),
-        description: description.trim() || null,
-        amount: value,
-        due_date: dueDate || null,
-        created_by: user?.id ?? null,
-      });
-
-      if (error) throw error;
-      onSaved();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Gagal menyimpan catatan.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <ModalShell title="Tambah Catatan Hutang/Piutang" onClose={onClose}>
-      <form onSubmit={submit} className="space-y-4">
-        <div>
-          <p className="label">Jenis</p>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => setDirection("payable")}
-              className={toggleClass(direction === "payable", "rose")}
-            >
-              Utang saya
-            </button>
-            <button
-              type="button"
-              onClick={() => setDirection("receivable")}
-              className={toggleClass(direction === "receivable", "emerald")}
-            >
-              Piutang saya
-            </button>
-          </div>
-        </div>
-
-        <div>
-          <label htmlFor="party" className="label">
-            {direction === "payable" ? "Nama supplier" : "Nama pelanggan"}
-          </label>
-          <input
-            id="party"
-            type="text"
-            required
-            value={party}
-            onChange={(e) => setParty(e.target.value)}
-            className="input"
-            placeholder={direction === "payable" ? "Contoh: Supplier Gas" : "Contoh: Pak Budi"}
-          />
-        </div>
-
-        <div>
-          <label htmlFor="debtAmount" className="label">
-            Nominal (Rp)
-          </label>
-          <input
-            id="debtAmount"
-            type="number"
-            min={1}
-            required
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            className="input"
-            placeholder="Contoh: 150000"
-          />
-        </div>
-
-        <div>
-          <label htmlFor="dueDate" className="label">
-            Jatuh tempo (opsional)
-          </label>
-          <input
-            id="dueDate"
-            type="date"
-            value={dueDate}
-            onChange={(e) => setDueDate(e.target.value)}
-            className="input"
-          />
-        </div>
-
-        <div>
-          <label htmlFor="debtDesc" className="label">
-            Keterangan (opsional)
-          </label>
-          <input
-            id="debtDesc"
-            type="text"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            className="input"
-            placeholder="Contoh: beli 2 tabung gas"
-          />
-        </div>
-
-        {error && <ErrorBox message={error} />}
-
-        <ModalActions saving={saving} onCancel={onClose} label="Simpan" />
-      </form>
-    </ModalShell>
-  );
+function customerName(row: AccountRow) {
+  const customer = row.customers;
+  if (Array.isArray(customer)) return customer[0]?.name ?? "Tanpa nama";
+  return customer?.name ?? "Tanpa nama";
 }
 
 function PayDebtModal({
-  debt,
+  row,
   onClose,
   onSaved,
 }: {
-  debt: DebtRow;
+  row: AccountRow;
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const remaining = Number(debt.amount) - Number(debt.paid_amount);
-  const [amount, setAmount] = useState(String(remaining));
+  const balance = Number(row.debt_balance);
+  const [amount, setAmount] = useState(String(balance));
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -505,37 +483,38 @@ function PayDebtModal({
     e.preventDefault();
     setError(null);
     const value = Number(amount);
+
     if (!Number.isFinite(value) || value <= 0) {
       return setError("Nominal harus lebih dari 0.");
     }
-    if (value > remaining) {
-      return setError("Nominal melebihi sisa yang harus dibayar.");
+    if (value > balance) {
+      return setError("Nominal melebihi sisa hutang.");
     }
 
     setSaving(true);
     try {
       const supabase = createClient();
-      const { error } = await supabase.rpc("pay_debt", {
-        p_debt_id: debt.id,
+      const { error } = await supabase.rpc("pay_customer_debt", {
+        p_customer_id: row.customer_id,
         p_amount: value,
         p_note: note.trim() || null,
       });
       if (error) throw error;
       onSaved();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Gagal menyimpan cicilan.");
+      setError(getErrorMessage(err, "Gagal menyimpan pembayaran."));
     } finally {
       setSaving(false);
     }
   }
 
   return (
-    <ModalShell title="Catat Cicilan" onClose={onClose}>
+    <ModalShell title="Bayar Hutang" onClose={onClose}>
       <form onSubmit={submit} className="space-y-4">
         <div className="rounded-xl bg-slate-50 p-3 text-sm">
-          <p className="font-semibold text-slate-800">{debt.party_name}</p>
+          <p className="font-semibold text-slate-800">{customerName(row)}</p>
           <p className="mt-0.5 text-slate-500">
-            Sisa: {formatRupiah(remaining)} dari {formatRupiah(debt.amount)}
+            Sisa hutang: {formatRupiah(balance)}
           </p>
         </div>
 
@@ -547,7 +526,7 @@ function PayDebtModal({
             id="payAmount"
             type="number"
             min={1}
-            max={remaining}
+            max={balance}
             required
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
@@ -565,16 +544,791 @@ function PayDebtModal({
             value={note}
             onChange={(e) => setNote(e.target.value)}
             className="input"
-            placeholder="Contoh: cicilan pertama"
+            placeholder="Contoh: bayar sebagian"
           />
         </div>
 
         {error && <ErrorBox message={error} />}
 
-        <ModalActions saving={saving} onCancel={onClose} label="Simpan cicilan" />
+        <ModalActions
+          saving={saving}
+          onCancel={onClose}
+          label={Number(amount) >= balance ? "Lunasi" : "Simpan pembayaran"}
+        />
       </form>
     </ModalShell>
   );
+}
+
+function DepositModal({
+  row,
+  mode,
+  onClose,
+  onSaved,
+}: {
+  row: AccountRow;
+  mode: DepositMode;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const balance = Number(row.deposit_balance);
+  const debt = Number(row.debt_balance);
+  const [amount, setAmount] = useState(mode === "refund" ? String(balance) : "");
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const value = Number(amount);
+
+    if (!Number.isFinite(value) || value <= 0) {
+      return setError("Nominal harus lebih dari 0.");
+    }
+    if (mode === "refund" && value > balance) {
+      return setError("Nominal melebihi saldo deposit.");
+    }
+    if (mode === "add" && debt > 0) {
+      return setError("Lunasi hutang pelanggan terlebih dahulu.");
+    }
+
+    setSaving(true);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.rpc(
+        mode === "add" ? "add_customer_deposit" : "refund_customer_deposit",
+        {
+          p_customer_id: row.customer_id,
+          p_amount: value,
+          p_note: note.trim() || null,
+        },
+      );
+      if (error) throw error;
+      onSaved();
+    } catch (err) {
+      setError(getErrorMessage(err, "Gagal menyimpan deposit."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <ModalShell
+      title={mode === "add" ? "Tambah Deposit" : "Tarik Deposit"}
+      onClose={onClose}
+    >
+      <form onSubmit={submit} className="space-y-4">
+        <div className="rounded-xl bg-slate-50 p-3 text-sm">
+          <p className="font-semibold text-slate-800">{customerName(row)}</p>
+          <p className="mt-0.5 text-slate-500">
+            Saldo deposit: {formatRupiah(balance)}
+          </p>
+          {debt > 0 && (
+            <p className="mt-1 text-xs font-medium text-rose-600">
+              Pelanggan masih punya hutang {formatRupiah(debt)}.
+            </p>
+          )}
+        </div>
+
+        <div>
+          <label htmlFor="depositAmount" className="label">
+            Nominal (Rp)
+          </label>
+          <input
+            id="depositAmount"
+            type="number"
+            min={1}
+            max={mode === "refund" ? balance : undefined}
+            required
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            className="input font-semibold"
+            placeholder="Contoh: 10000"
+          />
+        </div>
+
+        <div>
+          <label htmlFor="depositNote" className="label">
+            Catatan (opsional)
+          </label>
+          <input
+            id="depositNote"
+            type="text"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            className="input"
+            placeholder={
+              mode === "add" ? "Contoh: titip uang untuk besok" : "Contoh: sisa deposit diambil"
+            }
+          />
+        </div>
+
+        {error && <ErrorBox message={error} />}
+
+        <ModalActions
+          saving={saving}
+          onCancel={onClose}
+          label={mode === "add" ? "Simpan deposit" : "Tarik deposit"}
+        />
+      </form>
+    </ModalShell>
+  );
+}
+
+function AddDepositModal({
+  accounts,
+  onClose,
+  onSaved,
+}: {
+  accounts: AccountRow[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [amount, setAmount] = useState("");
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const trimmed = name.trim();
+    const value = Number(amount);
+
+    if (!trimmed) return setError("Nama pelanggan wajib diisi.");
+    if (!Number.isFinite(value) || value <= 0) {
+      return setError("Nominal harus lebih dari 0.");
+    }
+
+    const existing = accounts.find(
+      (row) => customerName(row).trim().toLowerCase() === trimmed.toLowerCase(),
+    );
+
+    if (existing && Number(existing.debt_balance) > 0) {
+      return setError(
+        `Pelanggan masih punya hutang ${formatRupiah(existing.debt_balance)}. Lunasi dulu.`,
+      );
+    }
+
+    setSaving(true);
+    try {
+      const supabase = createClient();
+      let customerId = existing?.customer_id;
+
+      if (!customerId) {
+        const { data, error } = await supabase.rpc("ensure_customer", {
+          p_name: trimmed,
+        });
+        if (error) throw error;
+        customerId = Number(data);
+      }
+
+      if (!customerId) {
+        throw new Error("Gagal membuat pelanggan.");
+      }
+
+      const { error } = await supabase.rpc("add_customer_deposit", {
+        p_customer_id: customerId,
+        p_amount: value,
+        p_note: note.trim() || null,
+      });
+      if (error) throw error;
+
+      onSaved();
+    } catch (err) {
+      setError(getErrorMessage(err, "Gagal menyimpan deposit."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <ModalShell title="Tambah Deposit" onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
+        <div>
+          <label htmlFor="depositCustomer" className="label">
+            Nama pelanggan
+          </label>
+          <input
+            id="depositCustomer"
+            type="text"
+            list="deposit-customer-options"
+            required
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className="input"
+            placeholder="Cari atau ketik nama pelanggan"
+          />
+          <datalist id="deposit-customer-options">
+            {accounts.map((row) => (
+              <option key={row.customer_id} value={customerName(row)} />
+            ))}
+          </datalist>
+        </div>
+
+        <div>
+          <label htmlFor="newDepositAmount" className="label">
+            Nominal deposit (Rp)
+          </label>
+          <input
+            id="newDepositAmount"
+            type="number"
+            min={1}
+            required
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            className="input font-semibold"
+            placeholder="Contoh: 10000"
+          />
+        </div>
+
+        <div>
+          <label htmlFor="newDepositNote" className="label">
+            Catatan (opsional)
+          </label>
+          <input
+            id="newDepositNote"
+            type="text"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            className="input"
+            placeholder="Contoh: titip uang untuk besok"
+          />
+        </div>
+
+        {error && <ErrorBox message={error} />}
+
+        <ModalActions saving={saving} onCancel={onClose} label="Simpan deposit" />
+      </form>
+    </ModalShell>
+  );
+}
+
+function AddDebtModal({
+  accounts,
+  onClose,
+  onSaved,
+}: {
+  accounts: AccountRow[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [amount, setAmount] = useState("");
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const trimmed = name.trim();
+    const value = Number(amount);
+
+    if (!trimmed) return setError("Nama pelanggan wajib diisi.");
+    if (!Number.isFinite(value) || value <= 0) {
+      return setError("Nominal harus lebih dari 0.");
+    }
+
+    const existing = accounts.find(
+      (row) => customerName(row).trim().toLowerCase() === trimmed.toLowerCase(),
+    );
+
+    if (existing && Number(existing.deposit_balance) > 0) {
+      return setError(
+        `Pelanggan masih punya deposit ${formatRupiah(existing.deposit_balance)}. Tarik deposit dulu.`,
+      );
+    }
+
+    setSaving(true);
+    try {
+      const supabase = createClient();
+      let customerId = existing?.customer_id;
+
+      if (!customerId) {
+        const { data, error } = await supabase.rpc("ensure_customer", {
+          p_name: trimmed,
+        });
+        if (error) throw error;
+        customerId = Number(data);
+      }
+
+      if (!customerId) {
+        throw new Error("Gagal membuat pelanggan.");
+      }
+
+      const { error } = await supabase.rpc("add_customer_debt", {
+        p_customer_id: customerId,
+        p_amount: value,
+        p_note: note.trim() || null,
+      });
+      if (error) throw error;
+
+      onSaved();
+    } catch (err) {
+      setError(getErrorMessage(err, "Gagal menyimpan hutang."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <ModalShell title="Tambah Hutang Manual" onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
+        <div>
+          <label htmlFor="debtCustomer" className="label">
+            Nama pelanggan
+          </label>
+          <input
+            id="debtCustomer"
+            type="text"
+            list="debt-customer-options"
+            required
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className="input"
+            placeholder="Cari atau ketik nama pelanggan"
+          />
+          <datalist id="debt-customer-options">
+            {accounts.map((row) => (
+              <option key={row.customer_id} value={customerName(row)} />
+            ))}
+          </datalist>
+        </div>
+
+        <div>
+          <label htmlFor="manualDebtAmount" className="label">
+            Nominal hutang (Rp)
+          </label>
+          <input
+            id="manualDebtAmount"
+            type="number"
+            min={1}
+            required
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            className="input font-semibold"
+            placeholder="Contoh: 5000"
+          />
+        </div>
+
+        <div>
+          <label htmlFor="manualDebtNote" className="label">
+            Catatan (opsional)
+          </label>
+          <input
+            id="manualDebtNote"
+            type="text"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            className="input"
+            placeholder="Contoh: hutang lama sebelum aplikasi"
+          />
+        </div>
+
+        {error && <ErrorBox message={error} />}
+
+        <ModalActions saving={saving} onCancel={onClose} label="Simpan hutang" />
+      </form>
+    </ModalShell>
+  );
+}
+
+function RenameCustomerModal({
+  row,
+  accounts,
+  onClose,
+  onSaved,
+}: {
+  row: AccountRow;
+  accounts: AccountRow[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState(customerName(row));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const target = accounts.find(
+    (account) =>
+      account.customer_id !== row.customer_id &&
+      customerName(account).trim().toLowerCase() === name.trim().toLowerCase(),
+  );
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const trimmed = name.trim();
+
+    if (!trimmed) return setError("Nama pelanggan wajib diisi.");
+
+    setSaving(true);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.rpc("rename_customer", {
+        p_customer_id: row.customer_id,
+        p_new_name: trimmed,
+      });
+      if (error) throw error;
+      onSaved();
+    } catch (err) {
+      setError(getErrorMessage(err, "Gagal mengubah nama pelanggan."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <ModalShell title="Edit Nama Pelanggan" onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
+        <div className="rounded-xl bg-slate-50 p-3 text-sm">
+          <p className="font-semibold text-slate-800">{customerName(row)}</p>
+          <p className="mt-0.5 text-slate-500">
+            Hutang: {formatRupiah(row.debt_balance)} · Deposit:{" "}
+            {formatRupiah(row.deposit_balance)}
+          </p>
+        </div>
+
+        <div>
+          <label htmlFor="renameCustomer" className="label">
+            Nama baru
+          </label>
+          <input
+            id="renameCustomer"
+            type="text"
+            required
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className="input"
+            placeholder="Contoh: Rofi"
+          />
+        </div>
+
+        {target && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-800">
+            Nama sudah dipakai <strong>{customerName(target)}</strong>. Saldo dan
+            riwayat akan digabung ke pelanggan tersebut.
+          </div>
+        )}
+
+        {error && <ErrorBox message={error} />}
+
+        <ModalActions
+          saving={saving}
+          onCancel={onClose}
+          label={target ? "Gabung & simpan" : "Simpan nama"}
+        />
+      </form>
+    </ModalShell>
+  );
+}
+
+function AdjustModal({
+  row,
+  defaultAccount,
+  onClose,
+  onSaved,
+}: {
+  row: AccountRow;
+  defaultAccount: AdjustmentAccount;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const debt = Number(row.debt_balance);
+  const deposit = Number(row.deposit_balance);
+  const [account, setAccount] = useState<AdjustmentAccount>(defaultAccount);
+  const [direction, setDirection] = useState<AdjustmentDirection>("sub");
+  const [amount, setAmount] = useState("");
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const current = account === "debt" ? debt : deposit;
+  const value = Number(amount);
+  const preview = Number.isFinite(value)
+    ? direction === "add"
+      ? current + value
+      : current - value
+    : current;
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+
+    if (!Number.isFinite(value) || value <= 0) {
+      return setError("Nominal harus lebih dari 0.");
+    }
+    if (!note.trim()) {
+      return setError("Catatan koreksi wajib diisi.");
+    }
+    if (direction === "sub" && value > current) {
+      return setError("Nominal melebihi saldo saat ini.");
+    }
+    if (account === "debt" && direction === "add" && deposit > 0) {
+      return setError("Tarik deposit pelanggan terlebih dahulu.");
+    }
+    if (account === "deposit" && direction === "add" && debt > 0) {
+      return setError("Lunasi hutang pelanggan terlebih dahulu.");
+    }
+
+    setSaving(true);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.rpc("adjust_customer_account", {
+        p_customer_id: row.customer_id,
+        p_account: account,
+        p_direction: direction,
+        p_amount: value,
+        p_note: note.trim(),
+      });
+      if (error) throw error;
+      onSaved();
+    } catch (err) {
+      setError(getErrorMessage(err, "Gagal menyimpan koreksi."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <ModalShell title="Koreksi Saldo" onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
+        <div className="rounded-xl bg-slate-50 p-3 text-sm">
+          <p className="font-semibold text-slate-800">{customerName(row)}</p>
+          <p className="mt-0.5 text-slate-500">
+            Hutang: {formatRupiah(debt)} · Deposit: {formatRupiah(deposit)}
+          </p>
+        </div>
+
+        <div>
+          <p className="label">Saldo yang dikoreksi</p>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setAccount("debt")}
+              className={segmentClass(account === "debt")}
+            >
+              Hutang
+            </button>
+            <button
+              type="button"
+              onClick={() => setAccount("deposit")}
+              className={segmentClass(account === "deposit")}
+            >
+              Deposit
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <p className="label">Arah koreksi</p>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setDirection("sub")}
+              className={segmentClass(direction === "sub")}
+            >
+              Kurangi
+            </button>
+            <button
+              type="button"
+              onClick={() => setDirection("add")}
+              className={segmentClass(direction === "add")}
+            >
+              Tambah
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <label htmlFor="adjustAmount" className="label">
+            Nominal koreksi (Rp)
+          </label>
+          <input
+            id="adjustAmount"
+            type="number"
+            min={1}
+            max={direction === "sub" ? current : undefined}
+            required
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            className="input font-semibold"
+            placeholder="Contoh: 9000"
+          />
+        </div>
+
+        <div>
+          <label htmlFor="adjustNote" className="label">
+            Catatan koreksi (wajib)
+          </label>
+          <input
+            id="adjustNote"
+            type="text"
+            required
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            className="input"
+            placeholder="Contoh: salah input nominal deposit"
+          />
+        </div>
+
+        <div className="space-y-1 rounded-xl bg-slate-50 px-4 py-3 text-sm">
+          <div className="flex justify-between">
+            <span className="text-slate-500">Saldo sekarang</span>
+            <span className="font-semibold text-slate-800">
+              {formatRupiah(current)}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-slate-500">Setelah koreksi</span>
+            <span
+              className={`font-semibold ${
+                preview < 0 ? "text-rose-600" : "text-emerald-600"
+              }`}
+            >
+              {formatRupiah(Math.max(preview, 0))}
+            </span>
+          </div>
+        </div>
+
+        {error && <ErrorBox message={error} />}
+
+        <ModalActions saving={saving} onCancel={onClose} label="Simpan koreksi" />
+      </form>
+    </ModalShell>
+  );
+}
+
+function HistoryModal({
+  row,
+  onClose,
+}: {
+  row: AccountRow;
+  onClose: () => void;
+}) {
+  const [entries, setEntries] = useState<CustomerLedgerEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    async function load() {
+      try {
+        const supabase = createClient();
+        const { data, error } = await supabase
+          .from("customer_ledger")
+          .select("id, customer_id, kind, amount, transaction_id, note, created_at")
+          .eq("customer_id", row.customer_id)
+          .order("created_at", { ascending: false });
+
+        if (error) throw error;
+        if (active) setEntries((data ?? []) as CustomerLedgerEntry[]);
+      } catch (err) {
+        if (active) {
+          setError(getErrorMessage(err, "Gagal memuat riwayat."));
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    load();
+    return () => {
+      active = false;
+    };
+  }, [row.customer_id]);
+
+  return (
+    <ModalShell title={`Riwayat · ${customerName(row)}`} onClose={onClose}>
+      <div className="space-y-4">
+        <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-50 p-3 text-sm">
+          <div>
+            <p className="text-xs text-slate-500">Hutang</p>
+            <p className="font-semibold text-rose-600">
+              {formatRupiah(row.debt_balance)}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs text-slate-500">Deposit</p>
+            <p className="font-semibold text-emerald-600">
+              {formatRupiah(row.deposit_balance)}
+            </p>
+          </div>
+        </div>
+
+        {error && <ErrorBox message={error} />}
+
+        {loading ? (
+          <div className="flex h-32 items-center justify-center">
+            <Loader2 className="h-5 w-5 animate-spin text-emerald-500" />
+          </div>
+        ) : entries.length === 0 ? (
+          <p className="py-6 text-center text-sm text-slate-500">
+            Belum ada riwayat.
+          </p>
+        ) : (
+          <ul className="max-h-[50vh] space-y-2 overflow-y-auto">
+            {entries.map((entry) => {
+              const meta = ledgerMeta(entry.kind);
+              return (
+                <li
+                  key={entry.id}
+                  className="flex items-start justify-between gap-3 rounded-xl border border-slate-100 px-3 py-2.5 text-sm"
+                >
+                  <div className="min-w-0">
+                    <p className="font-medium text-slate-800">{meta.label}</p>
+                    <p className="text-xs text-slate-400">
+                      {formatDateTime(entry.created_at)}
+                      {entry.transaction_id
+                        ? ` · Transaksi #${entry.transaction_id}`
+                        : ""}
+                    </p>
+                    {entry.note && (
+                      <p className="mt-0.5 text-xs text-slate-500">
+                        {entry.note}
+                      </p>
+                    )}
+                  </div>
+                  <span className={`shrink-0 font-semibold ${meta.tone}`}>
+                    {meta.sign}
+                    {formatRupiah(entry.amount)}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </ModalShell>
+  );
+}
+
+function ledgerMeta(kind: CustomerLedgerKind) {
+  switch (kind) {
+    case "debt_add":
+      return { label: "Hutang baru", sign: "+", tone: "text-rose-600" };
+    case "debt_payment":
+      return { label: "Bayar hutang", sign: "-", tone: "text-emerald-600" };
+    case "deposit_add":
+      return { label: "Deposit masuk", sign: "+", tone: "text-emerald-600" };
+    case "deposit_use":
+      return { label: "Deposit dipakai", sign: "-", tone: "text-amber-600" };
+    case "deposit_refund":
+      return { label: "Deposit ditarik", sign: "-", tone: "text-amber-600" };
+    case "debt_adjustment_add":
+      return { label: "Koreksi hutang (+)", sign: "+", tone: "text-rose-600" };
+    case "debt_adjustment_sub":
+      return { label: "Koreksi hutang (-)", sign: "-", tone: "text-emerald-600" };
+    case "deposit_adjustment_add":
+      return { label: "Koreksi deposit (+)", sign: "+", tone: "text-emerald-600" };
+    case "deposit_adjustment_sub":
+      return { label: "Koreksi deposit (-)", sign: "-", tone: "text-amber-600" };
+    default:
+      return { label: "Penyesuaian", sign: "", tone: "text-slate-600" };
+  }
 }
 
 function ModalShell({
@@ -650,12 +1404,10 @@ function tabClass(active: boolean) {
   }`;
 }
 
-function toggleClass(active: boolean, tone: "rose" | "emerald") {
-  const activeClass =
-    tone === "rose"
-      ? "border-rose-500 bg-rose-50 text-rose-700"
-      : "border-emerald-500 bg-emerald-50 text-emerald-700";
+function segmentClass(active: boolean) {
   return `rounded-xl border px-3 py-2.5 text-sm font-semibold transition ${
-    active ? activeClass : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+    active
+      ? "border-emerald-600 bg-emerald-50 text-emerald-700"
+      : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
   }`;
 }

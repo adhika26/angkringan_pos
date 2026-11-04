@@ -2,15 +2,18 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  Banknote,
   Download,
   Loader2,
   Printer,
+  ReceiptText,
   TrendingDown,
   TrendingUp,
   Wallet,
 } from "lucide-react";
 import { ReportChart } from "@/components/report-chart";
 import { createClient } from "@/lib/supabase/client";
+import { getErrorMessage } from "@/lib/error";
 import {
   endOfDay,
   formatRupiah,
@@ -24,9 +27,18 @@ type Mode = "daily" | "monthly";
 interface ReportRow {
   key: string;
   label: string;
-  income: number;
+  sales: number;
+  otherIncome: number;
+  cashIn: number;
   expense: number;
   count: number;
+}
+
+interface LedgerRow {
+  kind: string;
+  amount: number;
+  transaction_id: number | null;
+  created_at: string;
 }
 
 const MONTH_LABELS = [
@@ -98,26 +110,43 @@ export default function ReportsPage() {
           throw new Error("Rentang tanggal tidak valid.");
         }
 
-        const { data, error } = await supabase
-          .from("transactions")
-          .select("type, total, created_at")
-          .gte("created_at", startOfDay(range.start).toISOString())
-          .lte("created_at", endOfDay(range.end).toISOString());
+        const start = startOfDay(range.start).toISOString();
+        const end = endOfDay(range.end).toISOString();
 
-        if (error) throw error;
+        const [transactionsRes, ledgerRes] = await Promise.all([
+          supabase
+            .from("transactions")
+            .select("type, total, cash_received, change_amount, created_at")
+            .gte("created_at", start)
+            .lte("created_at", end),
+          supabase
+            .from("customer_ledger")
+            .select("kind, amount, transaction_id, created_at")
+            .gte("created_at", start)
+            .lte("created_at", end),
+        ]);
 
-        const rowsData = (data ?? []) as {
+        if (transactionsRes.error) throw transactionsRes.error;
+        if (ledgerRes.error) throw ledgerRes.error;
+
+        const rowsData = (transactionsRes.data ?? []) as {
           type: TransactionType;
           total: number;
+          cash_received: number | null;
+          change_amount: number;
           created_at: string;
         }[];
 
+        const ledgerData = (ledgerRes.data ?? []) as LedgerRow[];
+
         if (active) {
-          setRows(buildRows(rowsData, mode, range.start, range.end));
+          setRows(
+            buildRows(rowsData, ledgerData, mode, range.start, range.end),
+          );
         }
       } catch (err) {
         if (active) {
-          setError(err instanceof Error ? err.message : "Gagal memuat laporan.");
+          setError(getErrorMessage(err, "Gagal memuat laporan."));
         }
       } finally {
         if (active) setLoading(false);
@@ -133,14 +162,18 @@ export default function ReportsPage() {
   const totals = useMemo(() => {
     return rows.reduce(
       (acc, row) => {
-        acc.income += row.income;
+        acc.sales += row.sales;
+        acc.otherIncome += row.otherIncome;
+        acc.cashIn += row.cashIn;
         acc.expense += row.expense;
         acc.count += row.count;
         return acc;
       },
-      { income: 0, expense: 0, count: 0 },
+      { sales: 0, otherIncome: 0, cashIn: 0, expense: 0, count: 0 },
     );
   }, [rows]);
+
+  const profit = totals.sales + totals.otherIncome - totals.expense;
 
   const exportQuery = useMemo(() => {
     const params = new URLSearchParams({
@@ -181,7 +214,7 @@ export default function ReportsPage() {
             Laporan
           </h1>
           <p className="mt-1 text-sm text-slate-500">
-            Rekap pemasukan, pengeluaran, dan laba.
+            Rekap penjualan, kas masuk, pengeluaran, dan laba.
           </p>
         </div>
         <div className="flex gap-2">
@@ -281,30 +314,36 @@ export default function ReportsPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <StatCard
-          label="Total pemasukan"
-          value={formatRupiah(totals.income)}
+          label="Penjualan"
+          value={formatRupiah(totals.sales)}
           icon={<TrendingUp className="h-5 w-5" />}
           tone="emerald"
         />
         <StatCard
-          label="Total pengeluaran"
+          label="Kas masuk"
+          value={formatRupiah(totals.cashIn)}
+          icon={<Banknote className="h-5 w-5" />}
+          tone="sky"
+        />
+        <StatCard
+          label="Pengeluaran"
           value={formatRupiah(totals.expense)}
           icon={<TrendingDown className="h-5 w-5" />}
           tone="rose"
         />
         <StatCard
           label="Laba bersih"
-          value={formatRupiah(totals.income - totals.expense)}
+          value={formatRupiah(profit)}
           icon={<Wallet className="h-5 w-5" />}
-          tone="sky"
+          tone="amber"
         />
         <StatCard
           label="Jumlah transaksi"
           value={String(totals.count)}
-          icon={<Wallet className="h-5 w-5" />}
-          tone="amber"
+          icon={<ReceiptText className="h-5 w-5" />}
+          tone="slate"
         />
       </div>
 
@@ -319,7 +358,7 @@ export default function ReportsPage() {
         ) : (
           <ReportChart
             labels={rows.map((row) => row.label)}
-            income={rows.map((row) => row.income)}
+            income={rows.map((row) => row.sales)}
             expense={rows.map((row) => row.expense)}
           />
         )}
@@ -330,7 +369,9 @@ export default function ReportsPage() {
           <thead>
             <tr>
               <th>{mode === "daily" ? "Tanggal" : "Bulan"}</th>
-              <th className="text-right">Pemasukan</th>
+              <th className="text-right">Penjualan</th>
+              <th className="text-right">Pemasukan lain</th>
+              <th className="text-right">Kas masuk</th>
               <th className="text-right">Pengeluaran</th>
               <th className="text-right">Laba</th>
               <th className="text-right">Transaksi</th>
@@ -339,13 +380,13 @@ export default function ReportsPage() {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={5} className="py-10 text-center">
+                <td colSpan={7} className="py-10 text-center">
                   <Loader2 className="mx-auto h-6 w-6 animate-spin text-emerald-500" />
                 </td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td colSpan={5} className="py-10 text-center text-slate-500">
+                <td colSpan={7} className="py-10 text-center text-slate-500">
                   Belum ada data pada periode ini.
                 </td>
               </tr>
@@ -354,13 +395,19 @@ export default function ReportsPage() {
                 <tr key={row.key} className="hover:bg-slate-50/60">
                   <td className="font-medium text-slate-800">{row.label}</td>
                   <td className="text-right text-emerald-600">
-                    {formatRupiah(row.income)}
+                    {formatRupiah(row.sales)}
+                  </td>
+                  <td className="text-right text-slate-600">
+                    {formatRupiah(row.otherIncome)}
+                  </td>
+                  <td className="text-right text-sky-600">
+                    {formatRupiah(row.cashIn)}
                   </td>
                   <td className="text-right text-rose-600">
                     {formatRupiah(row.expense)}
                   </td>
                   <td className="text-right font-semibold text-slate-800">
-                    {formatRupiah(row.income - row.expense)}
+                    {formatRupiah(row.sales + row.otherIncome - row.expense)}
                   </td>
                   <td className="text-right text-slate-500">{row.count}</td>
                 </tr>
@@ -372,13 +419,19 @@ export default function ReportsPage() {
               <tr className="bg-slate-50 font-semibold">
                 <td className="px-4 py-3 text-slate-800">Total</td>
                 <td className="px-4 py-3 text-right text-emerald-700">
-                  {formatRupiah(totals.income)}
+                  {formatRupiah(totals.sales)}
+                </td>
+                <td className="px-4 py-3 text-right text-slate-700">
+                  {formatRupiah(totals.otherIncome)}
+                </td>
+                <td className="px-4 py-3 text-right text-sky-700">
+                  {formatRupiah(totals.cashIn)}
                 </td>
                 <td className="px-4 py-3 text-right text-rose-700">
                   {formatRupiah(totals.expense)}
                 </td>
                 <td className="px-4 py-3 text-right text-slate-900">
-                  {formatRupiah(totals.income - totals.expense)}
+                  {formatRupiah(profit)}
                 </td>
                 <td className="px-4 py-3 text-right text-slate-600">
                   {totals.count}
@@ -393,7 +446,14 @@ export default function ReportsPage() {
 }
 
 function buildRows(
-  data: { type: TransactionType; total: number; created_at: string }[],
+  data: {
+    type: TransactionType;
+    total: number;
+    cash_received: number | null;
+    change_amount: number;
+    created_at: string;
+  }[],
+  ledger: LedgerRow[],
   mode: Mode,
   start: Date,
   end: Date,
@@ -407,7 +467,9 @@ function buildRows(
       const row: ReportRow = {
         key,
         label: `${MONTH_LABELS[month]} ${start.getFullYear()}`,
-        income: 0,
+        sales: 0,
+        otherIncome: 0,
+        cashIn: 0,
         expense: 0,
         count: 0,
       };
@@ -424,7 +486,9 @@ function buildRows(
           day: "numeric",
           month: "short",
         }).format(cursor),
-        income: 0,
+        sales: 0,
+        otherIncome: 0,
+        cashIn: 0,
         expense: 0,
         count: 0,
       };
@@ -442,9 +506,37 @@ function buildRows(
         : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     const row = index.get(key);
     if (!row) return;
-    if (item.type === "expense") row.expense += Number(item.total);
-    else row.income += Number(item.total);
+
+    if (item.type === "expense") {
+      row.expense += Number(item.total);
+    } else if (item.type === "income") {
+      row.otherIncome += Number(item.total);
+      row.cashIn += Number(item.total);
+    } else {
+      row.sales += Number(item.total);
+      row.cashIn +=
+        Number(item.cash_received ?? item.total) -
+        Number(item.change_amount ?? 0);
+    }
     row.count += 1;
+  });
+
+  ledger.forEach((item) => {
+    if (item.transaction_id) return;
+    const d = new Date(item.created_at);
+    const key =
+      mode === "monthly"
+        ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`
+        : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const row = index.get(key);
+    if (!row) return;
+
+    const amount = Number(item.amount);
+    if (item.kind === "debt_payment" || item.kind === "deposit_add") {
+      row.cashIn += amount;
+    } else if (item.kind === "deposit_refund") {
+      row.cashIn -= amount;
+    }
   });
 
   return rows;
@@ -467,13 +559,14 @@ function StatCard({
   label: string;
   value: string;
   icon: React.ReactNode;
-  tone: "emerald" | "rose" | "sky" | "amber";
+  tone: "emerald" | "rose" | "sky" | "amber" | "slate";
 }) {
   const tones: Record<string, string> = {
     emerald: "bg-emerald-50 text-emerald-600",
     rose: "bg-rose-50 text-rose-600",
     sky: "bg-sky-50 text-sky-600",
     amber: "bg-amber-50 text-amber-600",
+    slate: "bg-slate-100 text-slate-600",
   };
   return (
     <div className="card p-4 sm:p-5">
